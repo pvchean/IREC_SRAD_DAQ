@@ -1,6 +1,9 @@
 /* IREC SRAD DAQ: ADS1115 (860 SPS) -> ISR -> task -> pfs_ingest() -> Paranoid FS on the ZD35Q1GC.
    The start-up follows firmware/main_esp32s3.c of Paranoid-FS (HAL-V3-7.6). */
 #include <stdint.h>
+#include <string.h>
+
+#include "esp_timer.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -36,6 +39,47 @@ static void on_sample(const ads_sample_t *s)
     (void)pfs_ingest(s_pfs, (const uint8_t *)&r, sizeof r);   /* never waits; the status counts drops */
 }
 
+#ifdef DAQ_SIM
+/* Test build: a sawtooth in place of the ADS1115, 1 kHz. It uses the same path (on_sample -> pfs_ingest). */
+static void sim_task(void *a)
+{
+    (void)a;
+    TickType_t t = xTaskGetTickCount();
+    for (uint32_t i = 0;; i++) {
+        ads_sample_t s = { (uint32_t)esp_timer_get_time(), (int16_t)(i & 0x7FFF) };
+        on_sample(&s);
+        vTaskDelayUntil(&t, 1);
+    }
+}
+
+/* Read the active file back and check that the seq field counts up with no gap. */
+static void readback_check(void)
+{
+    pfs_status_t st;
+    pfs_file_info_t fi;
+    uint8_t buf[512];
+    size_t got = 0;
+    uint16_t expect = 0;
+    uint32_t checked = 0, gaps = 0;
+
+    pfs_get_status(s_pfs, &st);
+    if (pfs_file_stat(s_pfs, st.active_file_id, &fi) != PFS_OK) { ESP_LOGE(TAG, "READBACK: no file"); return; }
+    for (uint64_t off = 0; off + sizeof buf <= fi.size_bytes && checked < 2000; off += sizeof buf) {
+        if (pfs_read(s_pfs, st.active_file_id, off, buf, sizeof buf, &got) != PFS_OK || got != sizeof buf) { break; }
+        for (size_t i = 0; i + sizeof(record_t) <= got; i += sizeof(record_t)) {
+            record_t r;
+            memcpy(&r, buf + i, sizeof r);
+            if (off == 0 && i == 0) { expect = r.seq; }
+            if (r.seq != expect || (uint16_t)r.reading != (uint16_t)(r.seq & 0x7FFF)) { gaps++; expect = r.seq; }
+            expect++; checked++;
+        }
+        /* a 512-byte block holds 64 records: the record grid stays aligned */
+    }
+    ESP_LOGI(TAG, "READBACK: file %u size=%llu records_checked=%lu errors=%lu",
+             (unsigned)st.active_file_id, (unsigned long long)fi.size_bytes, (unsigned long)checked, (unsigned long)gaps);
+}
+#endif
+
 static void writer_task(void *a) { pfs_writer_run((pfs_ctx_t *)a); }
 static void scan_task(void *a)   { pfs_scan_run((pfs_ctx_t *)a); vTaskDelete(NULL); }
 
@@ -58,7 +102,11 @@ void app_main(void)
     const pfs_nor_hal_t *nor  = pfs_nor_littlefs_get(&nor_cfg);
 
     /* The sensor starts first: pfs_ingest() buffers the data during the mount (HL-V3-9.1). */
+#ifdef DAQ_SIM
+    xTaskCreatePinnedToCore((TaskFunction_t)sim_task, "sim", 4096, NULL, 6, NULL, 1);
+#else
     if (ads1115_start(on_sample) != 0) { ESP_LOGE(TAG, "sensor not started"); }
+#endif
 
     while (pfs_mount(s_pfs, nand, nor) != PFS_OK) {
         ESP_LOGE(TAG, "pfs_mount failed, try again in 1 s");
@@ -69,9 +117,14 @@ void app_main(void)
     (void)xTaskCreateStaticPinnedToCore(scan_task, "pfs_scan", SCAN_STACK, s_pfs, 2,
                                         s_scan_stack, &s_scan_tcb, 1);
 
-    for (;;) {
+    for (int n = 0;; n++) {
         pfs_status_t st;
         vTaskDelay(pdMS_TO_TICKS(1000));
+#ifdef DAQ_SIM
+        if (n == 10) { readback_check(); }
+#else
+        (void)n;
+#endif
         pfs_get_status(s_pfs, &st);
         ESP_LOGI(TAG, "in=%llu drop=%llu pages=%lu degraded=%d nor_fail=%d seq=%u",
                  (unsigned long long)st.ingested_bytes, (unsigned long long)st.dropped_bytes,

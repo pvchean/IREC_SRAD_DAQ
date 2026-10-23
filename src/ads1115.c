@@ -1,5 +1,7 @@
 #include "ads1115.h"
 
+#include <stdbool.h>
+
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_attr.h"
@@ -49,9 +51,33 @@ static esp_err_t read_conv(int16_t *out)
     return e;
 }
 
+static int configure(i2c_master_bus_handle_t bus)
+{
+    if (write_reg(REG_HITHRESH, 0x8000) || write_reg(REG_LOTHRESH, 0x0000) || write_reg(REG_CONFIG, ADS_CONFIG)) {
+        return -1;
+    }
+    (void)bus;
+    return 0;
+}
+
+static i2c_master_bus_handle_t s_bus;
+
 static void ads_task(void *arg)
 {
     (void)arg;
+    /* The analog 5 V can come after the start: try again each second until the chip answers. */
+    for (bool warned = false; configure(s_bus) != 0; warned = true) {
+        if (!warned) { ESP_LOGW(TAG, "no answer from the ADS1115 at 0x48, trying again each second"); }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGI(TAG, "ADS1115 running");
+
+    const gpio_config_t gc = { .pin_bit_mask = 1ULL << I2C0_RDY_PIN, .mode = GPIO_MODE_INPUT,
+                               .pull_up_en = GPIO_PULLUP_ENABLE, .intr_type = GPIO_INTR_NEGEDGE };
+    gpio_config(&gc);
+    gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    gpio_isr_handler_add(I2C0_RDY_PIN, rdy_isr, NULL);
+
     for (;;) {
         ads_sample_t s;
         uint32_t n = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(BACKUP_MS));
@@ -62,7 +88,6 @@ static void ads_task(void *arg)
 
 int ads1115_start(ads_cb_t cb)
 {
-    i2c_master_bus_handle_t bus;
     const i2c_master_bus_config_t bc = {
         .i2c_port = I2C_NUM_0, .sda_io_num = I2C0_SDA_PIN, .scl_io_num = I2C0_SCL_PIN,
         .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7, .flags.enable_internal_pullup = true,
@@ -70,23 +95,10 @@ int ads1115_start(ads_cb_t cb)
     const i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = ADS_ADDR,
                                      .scl_speed_hz = 400000 };
     s_cb = cb;
-    if (i2c_new_master_bus(&bc, &bus) != ESP_OK || i2c_master_bus_add_device(bus, &dc, &s_dev) != ESP_OK) {
+    if (i2c_new_master_bus(&bc, &s_bus) != ESP_OK || i2c_master_bus_add_device(s_bus, &dc, &s_dev) != ESP_OK) {
         ESP_LOGE(TAG, "I2C set-up failed");
         return -1;
     }
-    if (write_reg(REG_HITHRESH, 0x8000) || write_reg(REG_LOTHRESH, 0x0000) || write_reg(REG_CONFIG, ADS_CONFIG)) {
-        ESP_LOGE(TAG, "no answer from the ADS1115 at 0x48. Scan of the bus:");
-        for (uint8_t a = 0x08; a < 0x78; a++) {
-            if (i2c_master_probe(bus, a, 20) == ESP_OK) { ESP_LOGW(TAG, "device at 0x%02X", a); }
-        }
-        return -1;
-    }
     xTaskCreatePinnedToCore(ads_task, "ads", 4096, NULL, 6, &s_task, 1);
-
-    const gpio_config_t gc = { .pin_bit_mask = 1ULL << I2C0_RDY_PIN, .mode = GPIO_MODE_INPUT,
-                               .pull_up_en = GPIO_PULLUP_ENABLE, .intr_type = GPIO_INTR_NEGEDGE };
-    gpio_config(&gc);
-    gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
-    gpio_isr_handler_add(I2C0_RDY_PIN, rdy_isr, NULL);
     return 0;
 }
