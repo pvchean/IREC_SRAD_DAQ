@@ -1,9 +1,11 @@
 #include "cmd.h"
 
+#include <dirent.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
@@ -11,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "chain.h"
 #include "io.h"
 #include "led_sr.h"
 #include "record.h"
@@ -24,6 +27,8 @@ static pfs_ctx_t *s_pfs;
 static void do_status(void)
 {
     pfs_status_t st;
+    chain_stats_t cs;
+    chain_get_stats(&cs);
     pfs_get_status(s_pfs, &st);
     printf("STATUS:OK rec=%d auto=%d addr=%u mounted=%d path=%u index=%d file=%u ingested=%" PRIu64 " dropped=%" PRIu64
            " pages=%" PRIu32 " degraded=%d no_storage=%d nor_failed=%d verify_fail=%" PRIu32 " rs_repairs=%" PRIu32
@@ -33,6 +38,25 @@ static void do_status(void)
            st.verify_failures, st.rs_repairs, st.usable_blocks, st.retired_blocks,
            sd_log_mounted(), sd_log_bytes(), sd_log_dropped(), sd_log_errors(),
            (uint64_t)(esp_timer_get_time() / 1000000));
+    printf("CHAIN: tx=%" PRIu32 " rx1=%" PRIu32 "/%" PRIu32 " rx2=%" PRIu32 "/%" PRIu32 " (ok/bad) fwd=%" PRIu32
+           " tx_drop=%" PRIu32 " own_dropped=%" PRIu32 "\n",
+           cs.tx_packets, cs.rx_ok[0], cs.rx_bad[0], cs.rx_ok[1], cs.rx_bad[1], cs.forwarded, cs.tx_drop, cs.own_dropped);
+}
+
+/* List the files on the SD card with their sizes. */
+static void do_sdls(void)
+{
+    DIR *d = sd_log_mounted() ? opendir("/sdcard") : NULL;
+    struct dirent *e;
+    if (!d) { printf("SDLS:ERR no card\n"); return; }
+    while ((e = readdir(d)) != NULL) {
+        struct stat sb;
+        char p[300];
+        snprintf(p, sizeof p, "/sdcard/%s", e->d_name);
+        printf("SDFILE %s %ld\n", e->d_name, stat(p, &sb) == 0 ? (long)sb.st_size : -1L);
+    }
+    closedir(d);
+    printf("SDLS:END\n");
 }
 
 static void do_list(void)
@@ -132,6 +156,7 @@ static void run(char *line)
     else if (!strcmp(tok, "STREAM")) { stream_enable(false); printf("STREAM:OFF\n"); }
     else if (!strcmp(tok, "STATUS")) { do_status(); }
     else if (!strcmp(tok, "LIST")) { do_list(); }
+    else if (!strcmp(tok, "SDLS")) { do_sdls(); }
     else if (!strcmp(tok, "REC")) {
         char *a = strtok(NULL, " \t");
         if (a && !strcmp(a, "ON")) { rec_set(true); } else if (a && !strcmp(a, "OFF")) { rec_set(false); }

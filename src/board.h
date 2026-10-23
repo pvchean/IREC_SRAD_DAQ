@@ -6,6 +6,11 @@
 #define I2C0_SCL_PIN   18
 #define I2C0_RDY_PIN   17      /* ADS1115 ALERT/RDY, falling edge = new sample */
 
+#define SERIAL1_TX_PIN 42
+#define SERIAL1_RX_PIN 41
+#define SERIAL2_TX_PIN 40
+#define SERIAL2_RX_PIN 39
+
 #define NAND_MISO_PIN  13
 #define NAND_MOSI_PIN  11
 #define NAND_CLK_PIN   12
@@ -21,6 +26,16 @@
 #define ADDR0_PIN      9
 #define ADDR1_PIN      48
 #define ADDR2_PIN      38
+
+/* Daisy chain (UART1 and UART2, 8N1). Needed line rate = 2 (safety) x 10 bit/byte x bytes/s of the busiest
+   link. A board sends 860 samples/s of the ADS1115 (8.6 byte per sample with the packet overhead, 7364 B/s)
+   and later the load cell (9.6 byte per sample, 8223 B/s). The link next to an end board carries all other
+   boards in one direction:  boards N | ADS only | ADS + load cell
+                             2        | 147 k    | 312 k  -> 460800 baud
+                             3        | 295 k    | 623 k  -> 921600 baud
+                             4        | 442 k    | 935 k  -> 1000000 baud
+   115200 baud carries only 11.5 KB/s: not enough for 2 x margin with one other board. */
+#define CHAIN_BAUD     460800
 
 /* Micro SD card, SDMMC slot 1, 1-bit mode. */
 #define SDMMC_CLK_PIN   21

@@ -7,13 +7,16 @@
 #define SD_LOG_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "pfs.h"
 #include "record.h"
 
 void sd_log_start(pfs_ctx_t *pfs);                 /* call after pfs_mount() */
-void sd_log_push(const record_t *r);               /* never waits */
+void sd_log_push(const record_t *r);               /* own record, never waits */
+/* Records of another board (sensor type 1): saved to F<own PFS file ID>D<remote ID>.BIN. Never waits. */
+void sd_log_push_remote(uint8_t dev, const uint8_t *records, size_t len);
 bool sd_log_mounted(void);
 uint32_t sd_log_dropped(void);                     /* records lost before the SD task took them */
 uint32_t sd_log_errors(void);                      /* failed writes */

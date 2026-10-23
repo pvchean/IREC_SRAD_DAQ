@@ -15,6 +15,7 @@
 
 #include "ads1115.h"
 #include "board.h"
+#include "chain.h"
 #include "cmd.h"
 #include "io.h"
 #include "led_sr.h"
@@ -37,9 +38,10 @@ static void on_sample(const ads_sample_t *s)
 {
     record_t r = { s->timestamp_us, s->reading, s_seq++ };
     stream_push(&r);                                           /* live readings, only after MATLAB PING */
-    if (!rec_get()) { return; }                                /* not recording: the sample is not stored */
+    if (!rec_get()) { chain_push_ads(&r, false); return; }     /* not recording: the sample is not stored */
     (void)pfs_ingest(s_pfs, (const uint8_t *)&r, sizeof r);   /* never waits; the status counts drops */
     sd_log_push(&r);                                           /* the backup copy */
+    chain_push_ads(&r, true);                                  /* to the other boards */
 }
 
 #ifdef DAQ_SIM
@@ -121,6 +123,7 @@ void app_main(void)
     led_sr_init();
     io_init();                                 /* the level of the mode pins sets recording at power-up */
     xTaskCreatePinnedToCore(led_task, "led", 3072, NULL, 1, NULL, 0);
+    chain_start();                             /* the packets of other boards pass through from the start */
 
     if (pfs_early_init(&s_pfs, os, &cfg) != PFS_OK) {
         ESP_LOGE(TAG, "pfs_early_init failed");
