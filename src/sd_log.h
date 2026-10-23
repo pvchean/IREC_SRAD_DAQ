@@ -18,6 +18,7 @@ void sd_log_push(const record_t *r);               /* own record, never waits */
 /* Records of another board (sensor type 1): saved to F<own PFS file ID>D<remote ID>.BIN. Never waits. */
 void sd_log_push_remote(uint8_t dev, const uint8_t *records, size_t len);
 bool sd_log_mounted(void);
+bool sd_log_flush(uint32_t timeout_ms);            /* write all staged bytes now; false if no card or error */
 uint32_t sd_log_dropped(void);                     /* records lost before the SD task took them */
 uint32_t sd_log_errors(void);                      /* failed writes */
 uint64_t sd_log_bytes(void);

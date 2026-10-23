@@ -34,5 +34,7 @@ device, type, count, records). Type 1 = ADS1115 (8-byte record), type 2 = load c
 The baud table is in `src/board.h`.
 
 ## USB serial commands (115200)
-`PING`, `MATLAB PING` (start live voltages), `STREAM OFF`, `STATUS`, `REC ON|OFF`, `FLUSH`, `LIST`, `SDLS`,
+Same replies as the Arduino sketch: `MATLAB PING` (banner, then live voltages), `STATUS` (`STATUS:OK (SD Overflows: n)`),
+`FLUSH` (`SD_FLUSHED:OK`). New: `PING` (banner only), `INFO` (details), `PFSFLUSH` (close the PFS file), `STREAM OFF`,
+`REC ON|OFF`, `LIST`, `SDLS`,
 `CHECK [file [n]]`, `DUMP file offset len`, `LED 0..255`.

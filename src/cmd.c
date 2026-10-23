@@ -24,7 +24,7 @@
 
 static pfs_ctx_t *s_pfs;
 
-static void do_status(void)
+static void do_info(void)
 {
     pfs_status_t st;
     chain_stats_t cs;
@@ -154,7 +154,8 @@ static void run(char *line)
         printf("LED:%u\n", led_get_brightness());
     }
     else if (!strcmp(tok, "STREAM")) { stream_enable(false); printf("STREAM:OFF\n"); }
-    else if (!strcmp(tok, "STATUS")) { do_status(); }
+    else if (!strcmp(tok, "STATUS")) { printf("STATUS:OK (SD Overflows: %lu)\n", (unsigned long)sd_log_dropped()); }   /* as the sketch */
+    else if (!strcmp(tok, "INFO")) { do_info(); }
     else if (!strcmp(tok, "LIST")) { do_list(); }
     else if (!strcmp(tok, "SDLS")) { do_sdls(); }
     else if (!strcmp(tok, "REC")) {
@@ -162,7 +163,8 @@ static void run(char *line)
         if (a && !strcmp(a, "ON")) { rec_set(true); } else if (a && !strcmp(a, "OFF")) { rec_set(false); }
         printf("REC:%s\n", rec_get() ? "ON" : "OFF");
     }
-    else if (!strcmp(tok, "FLUSH")) { printf("FLUSH:%s\n", pfs_flush(s_pfs, 2000) == PFS_OK ? "OK" : "ERR"); }
+    else if (!strcmp(tok, "FLUSH")) { printf(sd_log_flush(2000) ? "SD_FLUSHED:OK\n" : "SD_FLUSHED:ERR\n"); }   /* as the sketch */
+    else if (!strcmp(tok, "PFSFLUSH")) { printf("PFSFLUSH:%s\n", pfs_flush(s_pfs, 2000) == PFS_OK ? "OK" : "ERR"); }
     else if (!strcmp(tok, "CHECK")) {
         char *a = strtok(NULL, " \t"), *b = a ? strtok(NULL, " \t") : NULL;
         do_check(a ? atoi(a) : -1, b ? (uint32_t)strtoul(b, NULL, 10) : 200000U);

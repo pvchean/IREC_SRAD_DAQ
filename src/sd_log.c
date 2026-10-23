@@ -39,6 +39,7 @@ static volatile uint64_t s_bytes;
 /* One file for each device ID: the own ID and the IDs of the other boards. */
 typedef struct { FILE *f; uint8_t *buf; size_t n; TickType_t last; } dev_t_;
 static dev_t_ s_dev[NDEV];
+static volatile bool s_flush_req, s_flush_ok, s_flush_done;
 
 bool sd_log_mounted(void)    { return s_mounted; }
 uint32_t sd_log_dropped(void) { return s_dropped; }
@@ -109,6 +110,27 @@ static bool write_dev(int id, const uint8_t *data, size_t len)
     return true;
 }
 
+/* Request of the FLUSH command: write all staged bytes now. Runs in the SD task. */
+static bool flush_all(void)
+{
+    uint8_t tmp[512], rm[1 + 32 * 8];
+    size_t n, m;
+    bool ok = true;
+    while (ok && (n = xStreamBufferReceive(s_sb, tmp, sizeof tmp, 0)) > 0) { ok = write_dev(io_addr(), tmp, n); }
+    while (ok && (m = xMessageBufferReceive(s_rem, rm, sizeof rm, 0)) > 1) { ok = write_dev(rm[0] & (NDEV - 1), rm + 1, m - 1); }
+    for (int i = 0; ok && i < NDEV; i++) { ok = flush_dev(i); }
+    return ok;
+}
+
+bool sd_log_flush(uint32_t timeout_ms)
+{
+    if (!s_mounted) { return false; }
+    s_flush_done = false;
+    s_flush_req = true;
+    for (uint32_t t = 0; !s_flush_done && t < timeout_ms; t += 10) { vTaskDelay(pdMS_TO_TICKS(10)); }
+    return s_flush_done && s_flush_ok;
+}
+
 static void sd_fail(void)
 {
     s_errors++;
@@ -129,6 +151,14 @@ static void sd_task(void *arg)
         if (!s_mounted) {
             if (mount_card()) { s_mounted = true; ESP_LOGI(TAG, "card mounted"); }
             else { vTaskDelay(pdMS_TO_TICKS(2000)); continue; }
+        }
+        if (s_flush_req) {
+            s_flush_req = false;
+            ok = flush_all();
+            s_flush_ok = ok;
+            s_flush_done = true;
+            if (!ok) { sd_fail(); }
+            continue;
         }
         size_t n = xStreamBufferReceive(s_sb, tmp, sizeof tmp, pdMS_TO_TICKS(20));
         if (n) { ok = write_dev(io_addr(), tmp, n); }
