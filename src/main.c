@@ -109,7 +109,8 @@ static void scan_task(void *a)   { pfs_scan_run((pfs_ctx_t *)a); vTaskDelete(NUL
 
 void app_main(void)
 {
-    static const pfs_config_t cfg = { .device_id = 1U, .writer_timeout_ms = 1000U, .max_ingest_packet = 1024U };
+    /* io_init() ran above: the ADDR2..ADDR0 pins (0..7) are the device ID in each PFS page header. */
+    const pfs_config_t cfg = { .device_id = io_addr(), .writer_timeout_ms = 1000U, .max_ingest_packet = 1024U };
     const pfs_os_hal_t *os = pfs_os_esp32s3_get();
     spi_bus_esp32s3_cfg_t bus_cfg = {
         .mosi = NAND_MOSI_PIN, .miso = NAND_MISO_PIN, .sclk = NAND_CLK_PIN, .cs = NAND_CS_PIN,

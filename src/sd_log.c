@@ -12,6 +12,7 @@
 #include "sdmmc_cmd.h"
 
 #include "board.h"
+#include "io.h"
 
 #define CHUNK       4096U                 /* multiple of 512: good for SDMMC DMA */
 #define SB_SIZE     16384U                /* about 2.3 s of data at 860 SPS; internal RAM */
@@ -70,7 +71,7 @@ static void sd_task(void *arg)
             pfs_status_t st;
             char name[32];
             pfs_get_status(s_pfs, &st);
-            snprintf(name, sizeof name, "/sdcard/F%05u.BIN", (unsigned)st.active_file_id);
+            snprintf(name, sizeof name, "/sdcard/F%05uD%u.BIN", (unsigned)st.active_file_id, (unsigned)io_addr());
             f = fopen(name, "ab");
             if (f) { ESP_LOGI(TAG, "file %s", name); }
         }
