@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 
 #include "io.h"
+#include "led_sr.h"
 #include "record.h"
 #include "sd_log.h"
 #include "stream.h"
@@ -122,6 +123,11 @@ static void run(char *line)
     else if (!strcmp(tok, "MATLAB")) {            /* MATLAB PING: banner, then one voltage per line */
         char *a = strtok(NULL, " \t");
         if (a && !strcmp(a, "PING")) { printf("01010101 10101010 DAQBOARD V1 01010101 10101010\n"); fflush(stdout); stream_enable(true); }
+    }
+    else if (!strcmp(tok, "LED")) {               /* LED <0..255>: brightness of all LEDs */
+        char *a = strtok(NULL, " \t");
+        if (a) { long v = strtol(a, NULL, 10); led_set_brightness((uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v)); }
+        printf("LED:%u\n", led_get_brightness());
     }
     else if (!strcmp(tok, "STREAM")) { stream_enable(false); printf("STREAM:OFF\n"); }
     else if (!strcmp(tok, "STATUS")) { do_status(); }
