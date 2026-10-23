@@ -22,7 +22,7 @@ static void IRAM_ATTR button_isr(void *arg)
 {
     int64_t now = esp_timer_get_time();
     (void)arg;
-    if (now - s_last_us > DEBOUNCE_US) {
+    if (s_auto && now - s_last_us > DEBOUNCE_US) {   /* manual mode: only the REC command starts and stops */
         s_last_us = now;
         s_rec = !s_rec;
     }
@@ -46,7 +46,8 @@ void io_init(void)
     s_rec   = s_auto;
     ESP_LOGI(TAG, "mode1=%s mode2=%s addr=%u", s_auto ? "auto-record" : "manual", s_files ? "files" : "serial", s_addr);
 
-    /* The button pulls MODE1 to ground. In manual mode the switch holds it low, so no edge comes. */
+    /* The button pulls MODE1 to ground. It works in auto mode only; in manual mode the switch holds the
+       line low, and the REC ON / REC OFF command controls the recording. */
     const gpio_config_t bc = { .pin_bit_mask = 1ULL << MODE1_PIN, .mode = GPIO_MODE_INPUT,
                                .pull_up_en = GPIO_PULLUP_ENABLE, .intr_type = GPIO_INTR_NEGEDGE };
     gpio_config(&bc);
