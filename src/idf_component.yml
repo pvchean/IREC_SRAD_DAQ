@@ -1,0 +1,8 @@
+dependencies:
+  idf: ">=6.1,<6.2"
+  pfs:
+    # Local repository for now. After the push to GitHub, use:
+    #   git: https://github.com/pvchean/Paranoid-FS.git
+    git: file:///home/atomic/Documents/cpp_projects/Paranoid-FS
+    path: components/pfs
+    version: v0.3.1
