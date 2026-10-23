@@ -75,7 +75,10 @@ int ads1115_start(ads_cb_t cb)
         return -1;
     }
     if (write_reg(REG_HITHRESH, 0x8000) || write_reg(REG_LOTHRESH, 0x0000) || write_reg(REG_CONFIG, ADS_CONFIG)) {
-        ESP_LOGE(TAG, "no answer from the ADS1115 at 0x48");
+        ESP_LOGE(TAG, "no answer from the ADS1115 at 0x48. Scan of the bus:");
+        for (uint8_t a = 0x08; a < 0x78; a++) {
+            if (i2c_master_probe(bus, a, 20) == ESP_OK) { ESP_LOGW(TAG, "device at 0x%02X", a); }
+        }
         return -1;
     }
     xTaskCreatePinnedToCore(ads_task, "ads", 4096, NULL, 6, &s_task, 1);
