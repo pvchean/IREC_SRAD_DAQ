@@ -22,6 +22,11 @@
 #define ADDR1_PIN      48
 #define ADDR2_PIN      38
 
+/* Micro SD card, SDMMC slot 1, 1-bit mode. */
+#define SDMMC_CLK_PIN   21
+#define SDMMC_CMD_PIN   47
+#define SDMMC_DAT0_PIN  14
+
 /* LED shift register (from led_sr_driver.cpp). Output QA..QH = LED index 0..7. */
 #define SR_LATCH_PIN   5
 #define SR_CLOCK_PIN   4

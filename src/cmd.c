@@ -13,6 +13,8 @@
 
 #include "io.h"
 #include "record.h"
+#include "sd_log.h"
+#include "stream.h"
 
 #define CHUNK 1024U                      /* multiple of sizeof(record_t) */
 
@@ -24,10 +26,11 @@ static void do_status(void)
     pfs_get_status(s_pfs, &st);
     printf("STATUS:OK rec=%d auto=%d addr=%u mounted=%d path=%u index=%d file=%u ingested=%" PRIu64 " dropped=%" PRIu64
            " pages=%" PRIu32 " degraded=%d no_storage=%d nor_failed=%d verify_fail=%" PRIu32 " rs_repairs=%" PRIu32
-           " usable_blocks=%u retired=%u up_s=%" PRIu64 "\n",
+           " usable_blocks=%u retired=%u sd=%d sd_bytes=%" PRIu64 " sd_drop=%" PRIu32 " sd_err=%" PRIu32 " up_s=%" PRIu64 "\n",
            rec_get(), io_auto_mode(), io_addr(), st.mounted, st.mount_path, st.index_ready, st.active_file_id,
            st.ingested_bytes, st.dropped_bytes, st.pages_written, st.degraded, st.no_storage, st.nor_failed,
            st.verify_failures, st.rs_repairs, st.usable_blocks, st.retired_blocks,
+           sd_log_mounted(), sd_log_bytes(), sd_log_dropped(), sd_log_errors(),
            (uint64_t)(esp_timer_get_time() / 1000000));
 }
 
@@ -115,7 +118,12 @@ static void run(char *line)
 {
     char *tok = strtok(line, " \t");
     if (!tok) { return; }
-    if (!strcmp(tok, "PING") || !strcmp(tok, "MATLAB")) { printf("01010101 10101010 DAQBOARD V1 01010101 10101010\n"); }
+    if (!strcmp(tok, "PING")) { printf("01010101 10101010 DAQBOARD V1 01010101 10101010\n"); }
+    else if (!strcmp(tok, "MATLAB")) {            /* MATLAB PING: banner, then one voltage per line */
+        char *a = strtok(NULL, " \t");
+        if (a && !strcmp(a, "PING")) { printf("01010101 10101010 DAQBOARD V1 01010101 10101010\n"); fflush(stdout); stream_enable(true); }
+    }
+    else if (!strcmp(tok, "STREAM")) { stream_enable(false); printf("STREAM:OFF\n"); }
     else if (!strcmp(tok, "STATUS")) { do_status(); }
     else if (!strcmp(tok, "LIST")) { do_list(); }
     else if (!strcmp(tok, "REC")) {

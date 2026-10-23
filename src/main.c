@@ -19,6 +19,8 @@
 #include "io.h"
 #include "led_sr.h"
 #include "record.h"
+#include "sd_log.h"
+#include "stream.h"
 
 #define WRITER_STACK 8192U
 #define SCAN_STACK   4096U
@@ -34,8 +36,10 @@ static uint16_t     s_seq;
 static void on_sample(const ads_sample_t *s)
 {
     record_t r = { s->timestamp_us, s->reading, s_seq++ };
+    stream_push(&r);                                           /* live readings, only after MATLAB PING */
     if (!rec_get()) { return; }                                /* not recording: the sample is not stored */
     (void)pfs_ingest(s_pfs, (const uint8_t *)&r, sizeof r);   /* never waits; the status counts drops */
+    sd_log_push(&r);                                           /* the backup copy */
 }
 
 #ifdef DAQ_SIM
@@ -94,7 +98,7 @@ static void led_task(void *a)
         led_set(LED_AUTOREC, io_auto_mode());
         led_set(LED_WIFI, false);
         led_set(LED_NAND, st.mounted && !st.degraded && !st.no_storage && st.verify_failures == 0);
-        led_set(LED_SD, false);
+        led_set(LED_SD, sd_log_mounted());
         led_set(LED_ERROR, err);
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -141,6 +145,8 @@ void app_main(void)
     (void)xTaskCreateStaticPinnedToCore(scan_task, "pfs_scan", SCAN_STACK, s_pfs, 2,
                                         s_scan_stack, &s_scan_tcb, 1);
 
+    stream_start();
+    sd_log_start(s_pfs);
     cmd_start(s_pfs);
 
     for (int n = 0;; n++) {
