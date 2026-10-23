@@ -15,18 +15,16 @@
 
 #include "ads1115.h"
 #include "board.h"
+#include "cmd.h"
+#include "io.h"
+#include "led_sr.h"
+#include "record.h"
 
 #define WRITER_STACK 8192U
 #define SCAN_STACK   4096U
 
 static const char *TAG = "daq";
 
-/* The record on NAND: 8 bytes, little endian. The seq field shows lost samples. */
-typedef struct __attribute__((packed)) {
-    uint32_t timestamp_us;
-    int16_t  reading;
-    uint16_t seq;
-} record_t;
 
 static pfs_ctx_t   *s_pfs;
 static StaticTask_t s_writer_tcb, s_scan_tcb;
@@ -36,6 +34,7 @@ static uint16_t     s_seq;
 static void on_sample(const ads_sample_t *s)
 {
     record_t r = { s->timestamp_us, s->reading, s_seq++ };
+    if (!rec_get()) { return; }                                /* not recording: the sample is not stored */
     (void)pfs_ingest(s_pfs, (const uint8_t *)&r, sizeof r);   /* never waits; the status counts drops */
 }
 
@@ -80,6 +79,27 @@ static void readback_check(void)
 }
 #endif
 
+/* The LEDs show the state, 20 times per second. The LED of the sketch (Working) blinks. */
+static void led_task(void *a)
+{
+    (void)a;
+    for (uint32_t n = 0;; n++) {
+        pfs_status_t st = { 0 };
+        if (s_pfs) { pfs_get_status(s_pfs, &st); }
+        bool sensor = ads1115_running();
+        bool err = !s_pfs || st.degraded || st.no_storage || st.nor_failed || st.dropped_bytes > 0 ||
+                   (!sensor && n > 60);
+        led_set(LED_WORKING, (n / 8) % 2 == 0);
+        led_set(LED_RECORDING, rec_get());
+        led_set(LED_AUTOREC, io_auto_mode());
+        led_set(LED_WIFI, false);
+        led_set(LED_NAND, st.mounted && !st.degraded && !st.no_storage && st.verify_failures == 0);
+        led_set(LED_SD, false);
+        led_set(LED_ERROR, err);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 static void writer_task(void *a) { pfs_writer_run((pfs_ctx_t *)a); }
 static void scan_task(void *a)   { pfs_scan_run((pfs_ctx_t *)a); vTaskDelete(NULL); }
 
@@ -92,6 +112,10 @@ void app_main(void)
         .wp = NAND_WP_PIN, .hold = NAND_HOLD_PIN, .clock_hz = 40000000U, .log = os->log
     };
     static const pfs_nor_littlefs_cfg_t nor_cfg = { .partition_label = "pfs_nor", .base_path = "/pfs" };
+
+    led_sr_init();
+    io_init();                                 /* the level of the mode pins sets recording at power-up */
+    xTaskCreatePinnedToCore(led_task, "led", 3072, NULL, 1, NULL, 0);
 
     if (pfs_early_init(&s_pfs, os, &cfg) != PFS_OK) {
         ESP_LOGE(TAG, "pfs_early_init failed");
@@ -117,6 +141,8 @@ void app_main(void)
     (void)xTaskCreateStaticPinnedToCore(scan_task, "pfs_scan", SCAN_STACK, s_pfs, 2,
                                         s_scan_stack, &s_scan_tcb, 1);
 
+    cmd_start(s_pfs);
+
     for (int n = 0;; n++) {
         pfs_status_t st;
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -126,7 +152,7 @@ void app_main(void)
         (void)n;
 #endif
         pfs_get_status(s_pfs, &st);
-        ESP_LOGI(TAG, "in=%llu drop=%llu pages=%lu degraded=%d nor_fail=%d seq=%u",
+        if (n % 10 == 0) ESP_LOGI(TAG, "in=%llu drop=%llu pages=%lu degraded=%d nor_fail=%d seq=%u",
                  (unsigned long long)st.ingested_bytes, (unsigned long long)st.dropped_bytes,
                  (unsigned long)st.pages_written, st.degraded, st.nor_failed, s_seq);
     }

@@ -27,6 +27,9 @@ static i2c_master_dev_handle_t s_dev;
 static TaskHandle_t s_task;
 static ads_cb_t s_cb;
 static volatile uint32_t s_edge_us;
+static volatile bool s_running;
+
+bool ads1115_running(void) { return s_running; }
 
 static void IRAM_ATTR rdy_isr(void *arg)
 {
@@ -71,6 +74,7 @@ static void ads_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
     ESP_LOGI(TAG, "ADS1115 running");
+    s_running = true;
 
     const gpio_config_t gc = { .pin_bit_mask = 1ULL << I2C0_RDY_PIN, .mode = GPIO_MODE_INPUT,
                                .pull_up_en = GPIO_PULLUP_ENABLE, .intr_type = GPIO_INTR_NEGEDGE };

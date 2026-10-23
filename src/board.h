@@ -14,4 +14,19 @@
 #define NAND_WP_PIN    (-1)
 #define NAND_HOLD_PIN  (-1)
 
+
+/* Mode and address pins: input with pull-up. A switch to ground or a floating pin sets the level. */
+#define MODE1_PIN      1       /* high = auto record at power-up, low = manual. The tactile button also pulls it low. */
+#define MODE2_PIN      2       /* high = serial, low = files (USB mode, not used yet) */
+#define ADDR0_PIN      9
+#define ADDR1_PIN      48
+#define ADDR2_PIN      38
+
+/* LED shift register (from led_sr_driver.cpp). Output QA..QH = LED index 0..7. */
+#define SR_LATCH_PIN   5
+#define SR_CLOCK_PIN   4
+#define SR_DATA_PIN    6
+
+enum { LED_WORKING = 1, LED_RECORDING, LED_AUTOREC, LED_WIFI, LED_NAND, LED_SD, LED_ERROR };
+
 #endif

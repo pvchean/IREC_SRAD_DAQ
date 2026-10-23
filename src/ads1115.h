@@ -2,6 +2,7 @@
 #ifndef ADS1115_H
 #define ADS1115_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct {
@@ -13,5 +14,8 @@ typedef void (*ads_cb_t)(const ads_sample_t *s);
 
 /* Starts the sensor, the ISR, and the task. The callback runs in the ADS task and must not wait. */
 int ads1115_start(ads_cb_t cb);
+
+/* True after the chip answered and the data-ready interrupt runs. */
+bool ads1115_running(void);
 
 #endif
