@@ -28,7 +28,7 @@ function DAQ_Calibration_App()
 
     % Files & Plot window handles and data
     filesFig = []; boardList = []; localList = []; dirField = []; filesInfoLbl = [];
-    axF = []; startSlider = []; endSlider = []; startLbl = []; endLbl = []; statsLbl = []; unitDrop = [];
+    axF = []; warnLbl = []; startSlider = []; endSlider = []; startLbl = []; endLbl = []; statsLbl = []; unitDrop = [];
     boardFiles = struct('src', {}, 'name', {}, 'bytes', {}, 'start', {});
     plotT = []; plotRaw = []; plotSeq = []; plotName = ''; plotBytes = 0;
 
@@ -744,6 +744,8 @@ function DAQ_Calibration_App()
         unitDrop = uidropdown(filesFig, 'Position', [410, 12, 170, 22], ...
             'Items', {'Voltage (V)', 'Pressure (PSI, Ax+B)', 'Raw counts'}, 'ValueChangedFcn', @(~, ~) updateRangePlot());
         statsLbl = uilabel(filesFig, 'Position', [590, 12, 560, 22], 'Text', '');
+        warnLbl = uilabel(filesFig, 'Position', [360, 36, 790, 22], 'Text', '', 'FontWeight', 'bold', ...
+            'FontColor', [0.85, 0.33, 0.1]);
 
         updateChainLabel();
         refreshLocalFiles();
@@ -954,6 +956,7 @@ function DAQ_Calibration_App()
         if isempty(k)
             cla(axF);
             statsLbl.Text = 'No samples in the range';
+            warnLbl.Text = '';
             return;
         end
         switch unitDrop.Value
@@ -967,19 +970,30 @@ function DAQ_Calibration_App()
         yk = y(k);
         tk = plotT(k);
 
-        % More than maxPts samples: plot the min and max of each bucket (keeps the spikes visible)
-        maxPts = 20000;
+        % Plot no more than maxPts points. More samples in the range: each bucket of "step" samples gives
+        % two points (the min and the max, so the spikes stay visible). A shorter range gives more detail.
+        maxPts = 10000;
+        minPtsPerSec = 60;
         m = numel(k);
         if m > maxPts
             step = ceil(m / (maxPts / 2));
-            nb = floor(m / step);
-            yb = reshape(yk(1:nb*step), step, nb);
-            tb = reshape(tk(1:nb*step), step, nb);
+            nb = ceil(m / step);
+            pad = nb * step - m;                       % repeat the last sample: the last bucket is full
+            yb = reshape([yk; repmat(yk(end), pad, 1)], step, nb);
+            tb = reshape([tk; repmat(tk(end), pad, 1)], step, nb);
             xp = reshape([tb(1, :); tb(end, :)], [], 1);
             yp = reshape([min(yb, [], 1); max(yb, [], 1)], [], 1);
         else
             xp = tk;
             yp = yk;
+        end
+        span = max(tk(end) - tk(1), 1e-9);
+        ptsPerSec = numel(xp) / span;
+        if ptsPerSec < minPtsPerSec
+            warnLbl.Text = sprintf('Warning: %d of %d samples are plotted (%.0f points/s). Narrow the Start/End range for more detail.', ...
+                numel(xp), m, ptsPerSec);
+        else
+            warnLbl.Text = '';
         end
         cla(axF);
         plot(axF, xp, yp, 'b-');
