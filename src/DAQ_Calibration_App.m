@@ -41,7 +41,14 @@ function DAQ_Calibration_App()
     calTxt = [];           % Handle for the error text area in cal window
 
     % --- Output Directory & File Naming ---
-    outDir = 'DAQ Calibration';
+    % In MATLAB: next to the current folder. As a compiled app: in Documents (the install folder is read-only).
+    if isdeployed
+        homeDir = getenv('USERPROFILE');               % Windows
+        if isempty(homeDir), homeDir = getenv('HOME'); end
+        outDir = fullfile(homeDir, 'Documents', 'DAQ Calibration');
+    else
+        outDir = fullfile(pwd, 'DAQ Calibration');
+    end
     if ~exist(outDir, 'dir')
         mkdir(outDir);
     end
@@ -62,7 +69,7 @@ function DAQ_Calibration_App()
     % DAQ chain row: the boards on the UART chain and the one on USB
     chainLbl = uilabel(fig, 'Position', [20, 675, 900, 22], 'Text', 'DAQs in chain: (not connected)', 'FontWeight', 'bold');
     btnFiles = uibutton(fig, 'Position', [940, 675, 140, 22], 'Text', 'Files & Plot...', 'ButtonPushedFcn', @openFilesWindow);
-    downloadDir = fullfile(pwd, outDir, 'Downloads');
+    downloadDir = fullfile(outDir, 'Downloads');
 
     % Status, Connection, and Window Size Controls
     statusLbl = uilabel(fig, 'Position', [20, 640, 340, 22], 'Text', 'Status: Disconnected', 'FontWeight', 'bold');
@@ -896,6 +903,11 @@ function DAQ_Calibration_App()
 
     % --- Cleanup on Close ---
     fig.CloseRequestFcn = @(~, ~) closeApp();
+
+    % A compiled app ends when this function returns: wait for the window to close
+    if isdeployed
+        waitfor(fig);
+    end
     function closeApp()
         if ~isempty(daqTimer) && isvalid(daqTimer)
             stop(daqTimer);
