@@ -37,6 +37,11 @@
    115200 baud carries only 11.5 KB/s: not enough for 2 x margin with one other board. */
 #define CHAIN_BAUD     460800
 
+/* Second I2C bus (not used yet). Its RDY pin drives the sensor line in the toggle test (env daq_toggle). */
+#define I2C1_SDA_PIN   15
+#define I2C1_SCL_PIN   7
+#define I2C1_RDY_PIN   16
+
 /* Micro SD card, SDMMC slot 1, 1-bit mode. */
 #define SDMMC_CLK_PIN   21
 #define SDMMC_CMD_PIN   47

@@ -5,6 +5,7 @@
 
 #include "esp_timer.h"
 
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -106,6 +107,27 @@ static void led_task(void *a)
     }
 }
 
+#ifdef DAQ_TOGGLE
+/* Test signal for the chain test: GPIO 16 (I2C1 RDY) goes through the level shifter to the sensor line of both
+   boards. Only the board with device ID DAQ_TOGGLE_ID drives it; the other board leaves the pin as an input.
+   0 V / 3.3 V square wave, DAQ_TOGGLE_MS in each state. The readings step by about 17,600 counts. */
+#ifndef DAQ_TOGGLE_ID
+#define DAQ_TOGGLE_ID 3
+#endif
+#ifndef DAQ_TOGGLE_MS
+#define DAQ_TOGGLE_MS 250
+#endif
+static void toggle_task(void *a)
+{
+    (void)a;
+    gpio_set_direction(I2C1_RDY_PIN, GPIO_MODE_OUTPUT);
+    for (int level = 0;; level ^= 1) {
+        gpio_set_level(I2C1_RDY_PIN, level);
+        vTaskDelay(pdMS_TO_TICKS(DAQ_TOGGLE_MS));
+    }
+}
+#endif
+
 static void writer_task(void *a) { pfs_writer_run((pfs_ctx_t *)a); }
 static void scan_task(void *a)   { pfs_scan_run((pfs_ctx_t *)a); vTaskDelete(NULL); }
 
@@ -123,6 +145,9 @@ void app_main(void)
     led_sr_init();
     io_init();                                 /* the level of the mode pins sets recording at power-up */
     xTaskCreatePinnedToCore(led_task, "led", 3072, NULL, 1, NULL, 0);
+#ifdef DAQ_TOGGLE
+    if (io_addr() == DAQ_TOGGLE_ID) { xTaskCreatePinnedToCore(toggle_task, "toggle", 2048, NULL, 1, NULL, 0); }
+#endif
     chain_start();                             /* the packets of other boards pass through from the start */
 
     if (pfs_early_init(&s_pfs, os, &cfg) != PFS_OK) {
