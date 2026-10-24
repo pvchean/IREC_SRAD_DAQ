@@ -18,8 +18,9 @@
 #define REG_LOTHRESH    0x02
 #define REG_HITHRESH    0x03
 
-/* OS=1, MUX=AIN0, PGA=6.144 V, continuous, 860 SPS, comparator queue = RDY pin */
-#define ADS_CONFIG      0x80E0
+/* As the sketch: OS=1 (0x8000) | MUX=AIN0 against GND (0x4000) | PGA 6.144 V (0) | continuous (0) | 860 SPS (0x00E0)
+   | comparator queue 00 = RDY pin. MUX bits 000 would read AIN0 minus AIN1 (a floating pin: always about 0). */
+#define ADS_CONFIG      0xC0E0
 #define BACKUP_MS       3          /* no ready edge for 3 ms: read anyway (as the sketch) */
 
 static const char *TAG = "ads";
