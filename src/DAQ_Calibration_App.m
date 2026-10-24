@@ -30,7 +30,7 @@ function DAQ_Calibration_App()
     filesFig = []; boardList = []; localList = []; dirField = []; filesInfoLbl = [];
     axF = []; startSlider = []; endSlider = []; startLbl = []; endLbl = []; statsLbl = []; unitDrop = [];
     boardFiles = struct('src', {}, 'name', {}, 'bytes', {}, 'start', {});
-    plotT = []; plotRaw = []; plotSeq = []; plotName = '';
+    plotT = []; plotRaw = []; plotSeq = []; plotName = ''; plotBytes = 0;
 
     % Handles for performant live plotting and windows
     lineV = [];
@@ -879,7 +879,7 @@ function DAQ_Calibration_App()
         if isempty(name)
             return;
         end
-        [plotT, plotRaw, plotSeq] = loadRecords(fullfile(downloadDir, name));
+        [plotT, plotRaw, plotSeq, plotBytes] = loadRecords(fullfile(downloadDir, name));
         plotName = name;
         if isempty(plotT)
             cla(axF);
@@ -888,6 +888,7 @@ function DAQ_Calibration_App()
             return;
         end
         tEnd = max(plotT(end), 1e-3);
+        fprintf('Loaded %s: %d bytes, %d records, %.3f s\n', name, plotBytes, numel(plotT), tEnd);
         startSlider.Limits = [0, tEnd];
         endSlider.Limits = [0, tEnd];
         startSlider.Value = 0;
@@ -895,8 +896,9 @@ function DAQ_Calibration_App()
         updateRangePlot();
     end
 
-    function [t, raw, seq] = loadRecords(fpath)
+    function [t, raw, seq, nBytes] = loadRecords(fpath)
         % 8-byte records, little endian: u32 timestamp_us, i16 reading, u16 seq
+        nBytes = 0;
         fid = fopen(fpath, 'r');
         if fid == -1
             t = []; raw = []; seq = [];
@@ -904,6 +906,7 @@ function DAQ_Calibration_App()
         end
         bytes = fread(fid, inf, 'uint8=>uint8');
         fclose(fid);
+        nBytes = numel(bytes);
         n = floor(numel(bytes) / 8);
         if n == 0
             t = []; raw = []; seq = [];
@@ -981,7 +984,7 @@ function DAQ_Calibration_App()
         cla(axF);
         plot(axF, xp, yp, 'b-');
         xlim(axF, [t0, max(t1, t0 + 1e-6)]);
-        title(axF, plotName, 'Interpreter', 'none');
+        title(axF, sprintf('%s  (whole file: %d bytes, %d samples, %.1f s)', plotName, plotBytes, numel(plotT), plotT(end)), 'Interpreter', 'none');
         xlabel(axF, 'Time (s)');
         ylabel(axF, yl);
         grid(axF, 'on');
