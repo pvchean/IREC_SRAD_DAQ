@@ -122,12 +122,16 @@ static void do_files(void)
    The live stream stops and the log is muted while the file goes out. The stream starts again after. */
 static uint8_t s_frame[2 + FRAME];
 
+/* The driver puts a write in its TX ring buffer (4096 bytes) in one piece or not at all: a write larger than
+   the ring buffer always fails. So write in pieces of USB_PIECE bytes. */
+#define USB_PIECE 1024U
+
 static bool usb_put(const uint8_t *p, size_t n)
 {
     while (n) {
-        int w = usb_serial_jtag_write_bytes(p, n, pdMS_TO_TICKS(3000));
-        if (w <= 0) { return false; }          /* the host does not read */
-        p += w; n -= (size_t)w;
+        size_t k = n < USB_PIECE ? n : USB_PIECE;
+        if (usb_serial_jtag_write_bytes(p, k, pdMS_TO_TICKS(3000)) != (int)k) { return false; }   /* the host does not read */
+        p += k; n -= k;
     }
     return true;
 }
@@ -135,9 +139,10 @@ static bool usb_put(const uint8_t *p, size_t n)
 static bool send_frame(size_t len, uint32_t *crc, uint64_t *total)
 {
     s_frame[0] = (uint8_t)len; s_frame[1] = (uint8_t)(len >> 8);
-    *crc = esp_rom_crc32_le(*crc, s_frame + 2, (uint32_t)len);
+    if (!usb_put(s_frame, 2 + len)) { return false; }
+    *crc = esp_rom_crc32_le(*crc, s_frame + 2, (uint32_t)len);   /* count only the bytes that went out */
     *total += len;
-    return usb_put(s_frame, 2 + len);
+    return true;
 }
 
 static void do_get(const char *src, const char *name)

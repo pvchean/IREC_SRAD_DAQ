@@ -633,14 +633,24 @@ function DAQ_Calibration_App()
         data = buf(1:n);
         tail = waitLine({'GET:END'}, 5);
         tok = regexp(tail, 'bytes=(\d+) crc32=([0-9A-Fa-f]{8}) (\w+)', 'tokens', 'once');
-        ok = ~isempty(tok) && str2double(tok{1}) == n && strcmp(tok{3}, 'OK');
-        if ok
+        % Say which test failed: the DAQ send, the byte count, or the CRC
+        ok = false;
+        if isempty(tok)
+            msg = sprintf('bad end line "%s"', tail);
+        elseif ~strcmp(tok{3}, 'OK')
+            msg = sprintf('the DAQ reported a send or read error (got %d bytes): %s', n, tail);
+        elseif str2double(tok{1}) ~= n
+            msg = sprintf('byte count: DAQ sent %s, app got %d', tok{1}, n);
+        else
             c = crc32Of(data);
-            if ~isnan(c)
-                ok = c == hex2dec(tok{2});
+            if isnan(c)
+                ok = true; msg = 'OK (no CRC check: Java is not available)';
+            elseif c ~= hex2dec(tok{2})
+                msg = sprintf('CRC: DAQ %s, app %08X (%d bytes)', upper(tok{2}), c, n);
+            else
+                ok = true; msg = 'OK';
             end
         end
-        msg = tail;
     end
 
     function c = crc32Of(data)
