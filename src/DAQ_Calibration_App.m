@@ -724,7 +724,7 @@ function DAQ_Calibration_App()
         uibutton(pnlL, 'Position', [120, 10, 210, 26], 'Text', 'Plot Selected', 'ButtonPushedFcn', @plotSelected);
 
         % Plot with start / end range sliders
-        axF = uiaxes(filesFig, 'Position', [360, 150, 790, 560]);
+        axF = uiaxes(filesFig, 'Position', [360, 185, 790, 525]);
         grid(axF, 'on');
         title(axF, 'Select a downloaded file');
         xlabel(axF, 'Time (s)');
@@ -744,7 +744,7 @@ function DAQ_Calibration_App()
         unitDrop = uidropdown(filesFig, 'Position', [410, 12, 170, 22], ...
             'Items', {'Voltage (V)', 'Pressure (PSI, Ax+B)', 'Raw counts'}, 'ValueChangedFcn', @(~, ~) updateRangePlot());
         statsLbl = uilabel(filesFig, 'Position', [590, 12, 560, 22], 'Text', '');
-        warnLbl = uilabel(filesFig, 'Position', [360, 36, 790, 22], 'Text', '', 'FontWeight', 'bold', ...
+        warnLbl = uilabel(filesFig, 'Position', [360, 155, 790, 22], 'Text', '', 'FontWeight', 'bold', ...
             'FontColor', [0.85, 0.33, 0.1]);
 
         updateChainLabel();
