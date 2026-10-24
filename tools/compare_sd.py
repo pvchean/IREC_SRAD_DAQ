@@ -1,72 +1,57 @@
 #!/usr/bin/env python3
-"""Compare two DAQ record files (8-byte records, see README.md).
+"""Simple check of DAQ record files (8-byte records, see README.md).
 
   compare_sd.py A.BIN [B.BIN]
 
-One file: decode it and report the records, the seq steps, the time, and the readings.
-Two files: also find where B starts inside A (or A inside B) and compare the records one by one.
-The typical test: A = F<n>D3.BIN of board 3 (own data), B = F<m>D3.BIN of board 5 (the same data over UART).
-The seq field is 16 bit and wraps every 76 s, so the files are matched by their bytes, not by seq.
+Prints for each file: the number of records, the time, and min / mean / max of the readings.
+With two files it also says if they hold the same data.
+Example: A = local file of board 3 (F<n>D3.BIN), B = copy of it on the SD card of board 5.
 """
 import struct
 import sys
 
-REC = 8
-
 
 def load(path):
-    data = open(path, "rb").read()
-    n = len(data) // REC
-    recs = [data[i * REC:(i + 1) * REC] for i in range(n)]
-    return recs, len(data) % REC
+    d = open(path, "rb").read()
+    return [struct.unpack("<IhH", d[i:i + 8]) for i in range(0, len(d) - 7, 8)], [d[i:i + 8] for i in range(0, len(d) - 7, 8)]
 
 
-def describe(name, recs, tail):
-    print(f"{name}: {len(recs)} records, {tail} stray bytes")
+def stats(path, recs):
     if not recs:
-        return
-    ts, rd, sq = zip(*(struct.unpack("<IhH", r) for r in recs))
-    breaks = sum(1 for a, b in zip(sq, sq[1:]) if (b - a) & 0xFFFF != 1)
-    missing = sum(((b - a) & 0xFFFF) - 1 for a, b in zip(sq, sq[1:]) if (b - a) & 0xFFFF != 1)
-    back = sum(1 for a, b in zip(ts, ts[1:]) if (b - a) & 0xFFFFFFFF > 0x80000000)
-    dts = [(b - a) & 0xFFFFFFFF for a, b in zip(ts, ts[1:])]
-    near = [d for d in dts if d < 10000]
-    print(f"  seq {sq[0]}..{sq[-1]}  seq_breaks={breaks} missing={missing}  time_back={back}")
-    if near:
-        print(f"  mean interval {sum(near) / len(near):.0f} us, max gap {max(dts)} us, "
-              f"span {(ts[-1] - ts[0]) & 0xFFFFFFFF} us")
-    print(f"  readings min={min(rd)} max={max(rd)} mean={sum(rd) / len(rd):.1f}")
+        print(f"{path}: EMPTY")
+        return None
+    rd = [r[1] for r in recs]
+    secs = ((recs[-1][0] - recs[0][0]) & 0xFFFFFFFF) / 1e6
+    lost = sum(((b[2] - a[2]) & 0xFFFF) - 1 for a, b in zip(recs, recs[1:]) if (b[2] - a[2]) & 0xFFFF != 1)
+    print(f"{path}\n  {len(recs)} records, {secs:.1f} s, lost samples {lost}, "
+          f"readings min {min(rd)} / mean {sum(rd) / len(rd):.1f} / max {max(rd)}")
+    return len(recs), min(rd), sum(rd) / len(rd), max(rd)
 
 
 def main():
     if len(sys.argv) not in (2, 3):
         sys.exit(__doc__)
-    a, ta = load(sys.argv[1])
-    describe(sys.argv[1], a, ta)
+    a, ab = load(sys.argv[1])
+    sa = stats(sys.argv[1], a)
     if len(sys.argv) == 2:
         return
-    b, tb = load(sys.argv[2])
-    describe(sys.argv[2], b, tb)
-    if not a or not b:
-        sys.exit("one file is empty")
-    # Find the start of the shorter-starting file inside the other one.
-    if b[0] in set(a):
-        first, second, label = a, b, "B starts inside A"
-    elif a[0] in set(b):
-        first, second, label = b, a, "A starts inside B"
-    else:
-        sys.exit("NO MATCH: the first record of neither file is in the other file")
-    off = first.index(second[0])
-    n = min(len(second), len(first) - off)
-    bad = [i for i in range(n) if first[off + i] != second[i]]
-    print(f"{label}: offset {off} records ({off} records before the common part)")
-    print(f"common records compared: {n}, different: {len(bad)}")
-    if bad:
-        i = bad[0]
-        print(f"  first difference at common record {i}: {first[off + i].hex()} vs {second[i].hex()}")
-    rest_first, rest_second = len(first) - off - n, len(second) - n
-    print(f"records after the common part: first file {rest_first}, second file {rest_second}")
-    print("RESULT:", "IDENTICAL in the common part" if not bad else "DIFFERENT")
+    b, bb = load(sys.argv[2])
+    sb = stats(sys.argv[2], b)
+    if not sa or not sb:
+        sys.exit("RESULT: one file is empty")
+    # Exact test: the shorter-starting file is a piece of the other one (the remote copy starts later).
+    x, y = (ab, bb) if bb[0] in set(ab) else (bb, ab)
+    if y[0] in set(x):
+        off = x.index(y[0])
+        n = min(len(y), len(x) - off)
+        diff = sum(1 for i in range(n) if x[off + i] != y[i])
+        print(f"\n{n} records in common, {diff} different")
+        if diff == 0 and n > 0:
+            print("RESULT: SAME DATA")
+            return
+    # Broad test: similar size of the data and similar readings.
+    near = abs(sa[2] - sb[2]) <= 5 and abs(sa[1] - sb[1]) <= 20 and abs(sa[3] - sb[3]) <= 20
+    print("RESULT:", "BROADLY THE SAME (readings are alike, records are not identical)" if near else "DIFFERENT")
 
 
 main()
