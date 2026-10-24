@@ -139,6 +139,137 @@ static void do_dump(int file_id, uint64_t off, size_t len)
     printf("\n");
 }
 
+
+/* ---- COMPARE: the own data in PFS against the data of the other board on the SD card ----
+   Both boards read the same square wave on the sensor line. Their clocks and sample instants differ, so the
+   records are not equal byte by byte. The test finds the edges of the wave in both files and compares the
+   time between the edges and the two levels. It also tests the remote file for gaps (the chain test). */
+#define EDGE_MAX    200
+#define HI_ON       12000          /* counts: above = high */
+#define LO_ON       5000           /* counts: below = low */
+
+typedef struct {
+    uint32_t n_rec, seq_breaks, missing;
+    uint32_t edges;                 /* rising edges found */
+    uint32_t t[EDGE_MAX];           /* time of each rising edge, us */
+    uint64_t hi_sum, lo_sum;
+    uint32_t hi_n, lo_n;
+} wave_t;
+
+static void wave_add(wave_t *w, const record_t *r, bool *high, bool *have_prev, uint16_t *pseq)
+{
+    if (*have_prev) {
+        uint16_t ds = (uint16_t)(r->seq - *pseq);
+        if (ds != 1) { w->seq_breaks++; w->missing += (uint16_t)(ds - 1U); }
+    }
+    *have_prev = true; *pseq = r->seq; w->n_rec++;
+    if (r->reading > HI_ON) {
+        if (!*high && w->edges < EDGE_MAX && w->n_rec > 1) { w->t[w->edges++] = r->timestamp_us; }
+        *high = true; w->hi_sum += (uint64_t)r->reading; w->hi_n++;
+    } else if (r->reading < LO_ON) {
+        *high = false; w->lo_sum += (uint64_t)(r->reading + 1000); w->lo_n++;   /* +1000: stay positive */
+    }
+}
+
+static bool scan_pfs(uint16_t file_id, wave_t *w)
+{
+    static uint8_t buf[CHUNK];
+    pfs_file_info_t fi;
+    bool high = false, have = false;
+    uint16_t pseq = 0;
+    if (pfs_file_stat(s_pfs, file_id, &fi) != PFS_OK) { return false; }
+    uint64_t off = (fi.first_offset + sizeof(record_t) - 1) / sizeof(record_t) * sizeof(record_t);
+    for (;;) {
+        size_t got = 0;
+        if (pfs_read(s_pfs, file_id, off, buf, CHUNK, &got) != PFS_OK || got < sizeof(record_t)) { break; }
+        for (size_t i = 0; i + sizeof(record_t) <= got; i += sizeof(record_t)) {
+            record_t r;
+            memcpy(&r, buf + i, sizeof r);
+            wave_add(w, &r, &high, &have, &pseq);
+        }
+        off += got - got % sizeof(record_t);
+        if (w->edges >= EDGE_MAX) { break; }
+        vTaskDelay(1);
+    }
+    return true;
+}
+
+static bool scan_sd(const char *path, wave_t *w)
+{
+    static uint8_t buf[CHUNK];
+    bool high = false, have = false;
+    uint16_t pseq = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) { return false; }
+    size_t got;
+    while (w->edges < EDGE_MAX && (got = fread(buf, 1, CHUNK, f)) >= sizeof(record_t)) {
+        for (size_t i = 0; i + sizeof(record_t) <= got; i += sizeof(record_t)) {
+            record_t r;
+            memcpy(&r, buf + i, sizeof r);
+            wave_add(w, &r, &high, &have, &pseq);
+        }
+        vTaskDelay(1);
+    }
+    fclose(f);
+    return true;
+}
+
+static void print_wave(const char *name, const wave_t *w)
+{
+    printf("  %s: records=%" PRIu32 " seq_breaks=%" PRIu32 " missing=%" PRIu32 " edges=%" PRIu32
+           " high_mean=%" PRIu32 " low_mean=%" PRId32 "\n", name, w->n_rec, w->seq_breaks, w->missing, w->edges,
+           w->hi_n ? (uint32_t)(w->hi_sum / w->hi_n) : 0U, w->lo_n ? (int32_t)(w->lo_sum / w->lo_n) - 1000 : 0);
+}
+
+static void do_compare(int remote)
+{
+    static wave_t a, b;                               /* a = own data from PFS, b = remote data from SD */
+    pfs_status_t st;
+    char path[40];
+    memset(&a, 0, sizeof a); memset(&b, 0, sizeof b);
+    if (remote < 0 || remote > 7 || remote == (int)io_addr()) { printf("COMPARE:ERR give the ID of the other board\n"); return; }
+    if (!sd_log_flush(3000)) { printf("COMPARE:ERR the SD card does not flush\n"); return; }
+    pfs_get_status(s_pfs, &st);
+    /* The SD file of the other board: its sensor data, sent over UART, saved under its ID. */
+    snprintf(path, sizeof path, "/sdcard/F%05uD%d.BIN", (unsigned)st.active_file_id, remote);
+    printf("COMPARE: PFS file %u (own, ID %u) against %s (ID %d, over UART)\n",
+           (unsigned)st.active_file_id, io_addr(), path, remote);
+    if (!scan_pfs(st.active_file_id, &a)) { printf("COMPARE:ERR no PFS file\n"); return; }
+    if (!scan_sd(path, &b)) { printf("COMPARE:ERR no SD file %s\n", path); return; }
+    print_wave("PFS ", &a);
+    print_wave("SD  ", &b);
+
+    uint32_t n = a.edges < b.edges ? a.edges : b.edges;
+    if (n < 4) { printf("COMPARE:FAIL fewer than 4 edges (PFS %" PRIu32 ", SD %" PRIu32 "). Is the wave on the sensor line?\n", a.edges, b.edges); return; }
+    /* The files can start at different edges. Try each shift of the SD edges (0..3) and keep the best one. */
+    uint32_t best_bad = UINT32_MAX, best_shift = 0, best_cnt = 0;
+    int32_t worst = 0;
+    for (uint32_t shift = 0; shift < 4; shift++) {
+        for (int dir = 0; dir < 2; dir++) {
+            uint32_t sa = dir ? shift : 0, sb = dir ? 0 : shift;
+            uint32_t cnt = (a.edges - sa < b.edges - sb ? a.edges - sa : b.edges - sb);
+            uint32_t bad = 0;
+            int32_t w = 0;
+            for (uint32_t i = 1; i < cnt; i++) {
+                int32_t da = (int32_t)(a.t[sa + i] - a.t[sa + i - 1]), db = (int32_t)(b.t[sb + i] - b.t[sb + i - 1]);
+                int32_t d = da > db ? da - db : db - da;
+                if (d > w) { w = d; }
+                if (d > 4000) { bad++; }              /* 4 ms: two sample intervals */
+            }
+            if (cnt >= 4 && bad < best_bad) { best_bad = bad; best_shift = dir ? shift : (uint32_t)-(int32_t)shift; best_cnt = cnt; worst = w; }
+        }
+    }
+    uint32_t span_a = a.t[a.edges - 1] - a.t[0], span_b = b.t[b.edges - 1] - b.t[0];
+    int32_t hi_diff = (int32_t)(a.hi_n ? a.hi_sum / a.hi_n : 0) - (int32_t)(b.hi_n ? b.hi_sum / b.hi_n : 0);
+    int32_t lo_diff = (int32_t)(a.lo_n ? a.lo_sum / a.lo_n : 0) - (int32_t)(b.lo_n ? b.lo_sum / b.lo_n : 0);
+    bool ok = best_bad == 0 && (hi_diff > -400 && hi_diff < 400) && (lo_diff > -400 && lo_diff < 400) &&
+              b.seq_breaks == 0 && a.seq_breaks == 0;
+    printf("  edge intervals compared=%" PRIu32 " over_4ms=%" PRIu32 " worst_diff_us=%" PRId32 " edge_shift=%" PRId32
+           " span_pfs_us=%" PRIu32 " span_sd_us=%" PRIu32 " high_diff=%" PRId32 " low_diff=%" PRId32 "\n",
+           best_cnt - 1, best_bad, worst, (int32_t)best_shift, span_a, span_b, hi_diff, lo_diff);
+    printf("COMPARE:%s\n", ok ? "PASS the SD copy of the other board and the PFS data show the same wave" : "FAIL see the values above");
+}
+
 static void run(char *line)
 {
     char *tok = strtok(line, " \t");
@@ -158,6 +289,7 @@ static void run(char *line)
     else if (!strcmp(tok, "INFO")) { do_info(); }
     else if (!strcmp(tok, "LIST")) { do_list(); }
     else if (!strcmp(tok, "SDLS")) { do_sdls(); }
+    else if (!strcmp(tok, "COMPARE")) { char *a = strtok(NULL, " \t"); do_compare(a ? atoi(a) : -1); }
     else if (!strcmp(tok, "REC")) {
         char *a = strtok(NULL, " \t");
         if (a && !strcmp(a, "ON")) { rec_set(true); } else if (a && !strcmp(a, "OFF")) { rec_set(false); }
@@ -196,5 +328,5 @@ void cmd_start(pfs_ctx_t *pfs)
     s_pfs = pfs;
     usb_serial_jtag_driver_install(&cfg);
     usb_serial_jtag_vfs_use_driver();
-    xTaskCreatePinnedToCore(cmd_task, "cmd", 6144, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(cmd_task, "cmd", 8192, NULL, 1, NULL, 0);
 }

@@ -118,7 +118,10 @@ static bool flush_all(void)
     bool ok = true;
     while (ok && (n = xStreamBufferReceive(s_sb, tmp, sizeof tmp, 0)) > 0) { ok = write_dev(io_addr(), tmp, n); }
     while (ok && (m = xMessageBufferReceive(s_rem, rm, sizeof rm, 0)) > 1) { ok = write_dev(rm[0] & (NDEV - 1), rm + 1, m - 1); }
-    for (int i = 0; ok && i < NDEV; i++) { ok = flush_dev(i); }
+    for (int i = 0; ok && i < NDEV; i++) {
+        ok = flush_dev(i);
+        if (ok && s_dev[i].f) { fclose(s_dev[i].f); s_dev[i].f = NULL; }   /* closed: a reader can open the file */
+    }
     return ok;
 }
 
