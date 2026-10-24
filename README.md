@@ -45,11 +45,13 @@ A line without a line end runs after 500 ms (as the sketch: MATLAB sends `MATLAB
 For the MATLAB app (`src/DAQ_Calibration_App.m`, button *Files & Plot*) and `tools/daq_get.py`:
 - `DAQS` → `DAQS:SELF=<own ID> SEEN=<ID>,<ID>` — the boards that sent a packet in the last 3 s.
   This reply is one line also while the live stream is on.
-- `FILES` → `FILES:BEGIN`, `FILE PFS <file id> <bytes> <flags hex>` and `FILE SD <name> <bytes>` lines, `FILES:END`.
-- `GET PFS <file id>` or `GET SD <name>` → `GET:BEGIN <src> <name> <approx bytes>`, then binary frames
-  `[u16 len, little endian][len bytes]`, a frame with len 0, then `GET:END bytes=<n> crc32=<8 hex> OK|ERR`
-  (zlib CRC-32). Errors before the data: `GET:ERR <reason>`. The live stream stops during the transfer and starts
-  again after it. The data is the same 8-byte records as above (a PFS file starts at its first whole record).
+- `FILES` → `FILES:BEGIN`, `FILE PFS <file id> <bytes> <flags hex> <start>` and `FILE SD <name> <bytes>` lines,
+  `FILES:END`. `start` = the offset of the first whole record of the PFS file.
+- `CHUNK PFS <file id> <offset> <len>` or `CHUNK SD <name> <offset> <len>` (len up to 16384) →
+  `CHUNK:<offset> <n> <crc32, 8 hex>`, then n raw bytes (zlib CRC-32). n = 0 at the end of the file.
+  Errors: `CHUNK:ERR <reason>`. The host asks for the file chunk by chunk from `start` (SD: 0) and asks again for a
+  chunk with a bad CRC, so one bad byte on the USB link costs one chunk, not the file. The host sends `STREAM OFF`
+  before and `STREAM ON` after a download. The data is the same 8-byte records as above.
 
 ## Recording
 "Recording" means saving. With recording off, the board still samples, streams to USB after `MATLAB PING`, and sends

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""PC side of the DAQS, FILES and GET commands (the same protocol as the MATLAB app).
+"""PC side of the DAQS, FILES and CHUNK commands (the same protocol as the MATLAB app).
 
   daq_get.py PORT daqs                 the boards in the chain
   daq_get.py PORT files                the PFS and SD files of the connected board
-  daq_get.py PORT get PFS 12 [DIR]     download PFS file 12 to DIR/PFS_F00012D<id>.BIN
-  daq_get.py PORT get SD F00012D3.BIN [DIR]
+  daq_get.py PORT get PFS 12 [DIR]     download PFS file 12 to DIR/NAND_F00012D<id>.BIN
+  daq_get.py PORT get SD F00012D3.BIN [DIR]     (to DIR/uSD_F00012D3.BIN)
   daq_get.py PORT all [DIR]            download all files
 
-The GET reply is binary: frames [u16 len][len bytes], a frame with len 0, then "GET:END ... crc32=..".
+Download: "CHUNK <src> <name> <offset> <len>" -> "CHUNK:<offset> <n> <crc32>" + n raw bytes; n = 0 at the end.
 """
 import os
 import re
@@ -29,6 +29,9 @@ def line(s, prefixes, timeout=5.0):
 
 
 def daqs(s):
+    s.write(b"STREAM OFF\n")
+    line(s, ("STREAM:OFF",))
+    s.reset_input_buffer()
     s.write(b"DAQS\n")
     m = re.match(r"DAQS:SELF=(\d+) SEEN=([\d,]*)", line(s, ("DAQS:",)))
     return int(m.group(1)), [int(x) for x in m.group(2).split(",") if x]
@@ -43,34 +46,50 @@ def files(s):
         if t == "FILES:END":
             return out
         p = t.split()
-        out.append((p[1], p[2], int(p[3])))
+        out.append((p[1], p[2], int(p[3]), int(p[5]) if len(p) > 5 else 0))   # src, name, bytes, start
 
 
-def get(s, src, name, self_id):
-    s.write(f"GET {src} {name}\n".encode())
-    t = line(s, ("GET:BEGIN", "GET:ERR"), 10.0)
-    if t.startswith("GET:ERR"):
-        raise RuntimeError(t)
-    data = bytearray()
+def get(s, f, self_id):
+    src, name, start = f[0], f[1], f[3]
     t0 = time.time()
-    while True:
-        h = s.read(2)
-        if len(h) < 2:
-            raise TimeoutError("frame header")
-        n = h[0] | h[1] << 8
-        if n == 0:
-            break
-        b = s.read(n)
-        if len(b) < n:
-            raise TimeoutError("frame data")
-        data += b
-    m = re.match(r"GET:END bytes=(\d+) crc32=([0-9A-F]{8}) (\w+)", line(s, ("GET:END",)))
+    data, retries = get_chunks(s, src, name, start)
     dt = time.time() - t0
-    ok = m and int(m.group(1)) == len(data) and int(m.group(2), 16) == zlib.crc32(data) and m.group(3) == "OK"
     print(f"  {src} {name}: {len(data)} bytes in {dt:.1f} s ({len(data) / max(dt, 1e-3) / 1024:.0f} KiB/s), "
-          f"{'CRC OK' if ok else 'BAD ' + str(m.groups() if m else None) + f' local crc {zlib.crc32(data):08X}'}")
-    local = f"PFS_F{int(name):05d}D{self_id}.BIN" if src == "PFS" else f"SD_{name}"
-    return local, bytes(data), ok
+          f"{retries} chunks asked for again")
+    local = f"NAND_F{int(name):05d}D{self_id}.BIN" if src == "PFS" else f"uSD_{name}"
+    return local, data
+
+
+def get_chunks(s, src, name, start, chunk=16384, tries=5):
+    """Download with CHUNK requests. Returns (data, retries). A chunk with an error is asked for again."""
+    data, off, retries = bytearray(), start, 0
+    while True:
+        for t in range(tries):
+            s.write(f"CHUNK {src} {name} {off} {chunk}\n".encode())
+            hdr = line(s, ("CHUNK:",), 5.0)
+            m = re.match(r"CHUNK:(\d+) (\d+) ([0-9A-Fa-f]{8})", hdr)
+            err = hdr if hdr.startswith("CHUNK:ERR") else None
+            if not err and (not m or int(m.group(1)) != off):
+                err = f"bad reply {hdr!r}"
+            if not err:
+                n = int(m.group(2))
+                b = s.read(n)
+                if len(b) < n:
+                    err = f"only {len(b)} of {n} bytes"
+                elif zlib.crc32(b) != int(m.group(3), 16):
+                    err = f"CRC DAQ {m.group(3)} PC {zlib.crc32(b):08X}"
+            if not err:
+                break
+            retries += 1
+            print(f"    retry at offset {off}: {err}")
+            time.sleep(0.3)
+            s.reset_input_buffer()
+        else:
+            raise RuntimeError(f"offset {off}: {err}")
+        if n == 0:
+            return bytes(data), retries
+        data += b
+        off += n
 
 
 def main():
@@ -87,14 +106,13 @@ def main():
         for f in files(s):
             print(" ".join(map(str, f)))
     elif a[1] in ("get", "all"):
-        todo = [(a[2], a[3])] if a[1] == "get" else [(f[0], f[1]) for f in files(s)]
+        lst = files(s)
+        todo = [f for f in lst if (f[0], f[1]) == (a[2], a[3])] if a[1] == "get" else lst
         out = (a[4] if len(a) > 4 else ".") if a[1] == "get" else (a[2] if len(a) > 2 else ".")
         os.makedirs(out, exist_ok=True)
-        for src, name in todo:
-            local, data, ok = get(s, src, name, self_id)
+        for f in todo:
+            local, data = get(s, f, self_id)
             open(os.path.join(out, local), "wb").write(data)
-            if not ok:
-                sys.exit(1)
 
 
 if __name__ == "__main__":

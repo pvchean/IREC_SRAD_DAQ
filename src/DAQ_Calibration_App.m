@@ -24,12 +24,12 @@ function DAQ_Calibration_App()
     selfId = -1;       % Device ID of the DAQ on USB (-1 = unknown)
     seenIds = [];      % Device IDs of the other DAQs in the chain
     portName = '';     % Serial port of the connected DAQ
-    xferBusy = false;  % True while a FILES/GET transfer owns the serial port
+    xferBusy = false;  % True while a FILES/CHUNK transfer owns the serial port
 
     % Files & Plot window handles and data
     filesFig = []; boardList = []; localList = []; dirField = []; filesInfoLbl = [];
     axF = []; startSlider = []; endSlider = []; startLbl = []; endLbl = []; statsLbl = []; unitDrop = [];
-    boardFiles = struct('src', {}, 'name', {}, 'bytes', {});
+    boardFiles = struct('src', {}, 'name', {}, 'bytes', {}, 'start', {});
     plotT = []; plotRaw = []; plotSeq = []; plotName = '';
 
     % Handles for performant live plotting and windows
@@ -513,7 +513,7 @@ function DAQ_Calibration_App()
     end
 
     % =====================================================================
-    % --- Serial transfer helpers (FILES and GET commands) ---
+    % --- Serial transfer helpers (FILES and CHUNK commands) ---
     % =====================================================================
     function closePort()
         if ~isempty(s) && isvalid(s)
@@ -577,8 +577,8 @@ function DAQ_Calibration_App()
 
     function files = queryFiles()
         % Call between pauseSerial() and resumeSerial().
-        % FILES reply: "FILE PFS <id> <bytes> <flags>" and "FILE SD <name> <bytes>", then "FILES:END"
-        files = struct('src', {}, 'name', {}, 'bytes', {});
+        % FILES reply: "FILE PFS <id> <bytes> <flags> <start>" and "FILE SD <name> <bytes>", then "FILES:END"
+        files = struct('src', {}, 'name', {}, 'bytes', {}, 'start', {});
         writeline(s, "FILES");
         waitLine({'FILES:BEGIN'}, 5);
         while true
@@ -588,68 +588,96 @@ function DAQ_Calibration_App()
             end
             p = strsplit(ln);
             if numel(p) >= 4
-                files(end+1) = struct('src', p{2}, 'name', p{3}, 'bytes', str2double(p{4})); %#ok<AGROW>
+                startOff = 0; % offset of the first whole record (PFS); SD files start at 0
+                if numel(p) >= 6
+                    startOff = str2double(p{6});
+                end
+                files(end+1) = struct('src', p{2}, 'name', p{3}, 'bytes', str2double(p{4}), 'start', startOff); %#ok<AGROW>
             end
         end
     end
 
-    function [data, ok, msg] = getFile(src, name, dlg)
+    function [data, ok, msg, retries] = getFile(f, dlg)
         % Call between pauseSerial() and resumeSerial().
-        % GET reply: "GET:BEGIN ...", frames [u16 len LE][len bytes], a 0 frame, "GET:END bytes=<n> crc32=<hex> OK|ERR"
-        writeline(s, sprintf('GET %s %s', src, name));
-        hdr = waitLine({'GET:BEGIN', 'GET:ERR'}, 10);
-        if startsWith(hdr, 'GET:ERR')
-            data = uint8([]); ok = false; msg = hdr;
-            return;
-        end
-        p = strsplit(hdr);
-        approx = max(str2double(p{end}), 1);
+        % Ask for the file one chunk at a time; a chunk with an error is asked for again (up to maxTries times).
+        chunkLen = 16384;
+        maxTries = 5;
+        approx = max(f.bytes, 1);
         buf = zeros(approx + 65536, 1, 'uint8');
         n = 0;
-        frames = 0;
+        retries = 0;
+        off = f.start;
         while true
-            h = read(s, 2, 'uint8');
-            if numel(h) < 2
-                error('DAQ:timeout', 'The DAQ stopped sending (frame header).');
+            tries = 0;
+            while true
+                [d, err] = getChunk(f, off, chunkLen);
+                if isempty(err)
+                    break;
+                end
+                tries = tries + 1;
+                retries = retries + 1;
+                if tries >= maxTries
+                    data = buf(1:n);
+                    ok = false;
+                    msg = sprintf('%s (offset %d, %d tries)', err, off, tries);
+                    return;
+                end
+                pause(0.3);   % let the rest of a bad chunk arrive, then drop it
+                flush(s);
             end
-            len = double(h(1)) + 256 * double(h(2));
-            if len == 0
-                break;
+            if isempty(d)
+                break;        % a chunk with 0 bytes: the end of the file
             end
-            d = read(s, len, 'uint8');
-            if numel(d) < len
-                error('DAQ:timeout', 'The DAQ stopped sending (frame data).');
-            end
-            if n + len > numel(buf)
+            m = numel(d);
+            while n + m > numel(buf)
                 buf(2 * numel(buf)) = 0; % grow
             end
-            buf(n+1:n+len) = d(:);
-            n = n + len;
-            frames = frames + 1;
-            if ~isempty(dlg) && mod(frames, 16) == 0
+            buf(n+1:n+m) = d;
+            n = n + m;
+            off = off + m;
+            if ~isempty(dlg)
                 dlg.Value = min(1, n / approx);
             end
         end
         data = buf(1:n);
-        tail = waitLine({'GET:END'}, 5);
-        tok = regexp(tail, 'bytes=(\d+) crc32=([0-9A-Fa-f]{8}) (\w+)', 'tokens', 'once');
-        % Say which test failed: the DAQ send, the byte count, or the CRC
-        ok = false;
-        if isempty(tok)
-            msg = sprintf('bad end line "%s"', tail);
-        elseif ~strcmp(tok{3}, 'OK')
-            msg = sprintf('the DAQ reported a send or read error (got %d bytes): %s', n, tail);
-        elseif str2double(tok{1}) ~= n
-            msg = sprintf('byte count: DAQ sent %s, app got %d', tok{1}, n);
-        else
-            c = crc32Of(data);
-            if isnan(c)
-                ok = true; msg = 'OK (no CRC check: Java is not available)';
-            elseif c ~= hex2dec(tok{2})
-                msg = sprintf('CRC: DAQ %s, app %08X (%d bytes)', upper(tok{2}), c, n);
-            else
-                ok = true; msg = 'OK';
-            end
+        ok = true;
+        msg = sprintf('OK, %d bytes', n);
+    end
+
+    function [d, err] = getChunk(f, off, len)
+        % CHUNK reply: "CHUNK:<offset> <n> <crc32 hex>", then n raw bytes; "CHUNK:ERR <reason>" on an error
+        d = uint8([]);
+        err = '';
+        writeline(s, sprintf('CHUNK %s %s %d %d', f.src, f.name, off, len));
+        try
+            hdr = waitLine({'CHUNK:'}, 5);
+        catch ME
+            err = ME.message;
+            return;
+        end
+        if startsWith(hdr, 'CHUNK:ERR')
+            err = hdr;
+            return;
+        end
+        tok = regexp(hdr, '^CHUNK:(\d+) (\d+) ([0-9A-Fa-f]{8})', 'tokens', 'once');
+        if isempty(tok) || str2double(tok{1}) ~= off
+            err = sprintf('bad reply "%s"', hdr);
+            return;
+        end
+        cnt = str2double(tok{2});
+        if cnt == 0
+            return;
+        end
+        raw = read(s, cnt, 'uint8');
+        if numel(raw) < cnt
+            err = sprintf('only %d of %d bytes came', numel(raw), cnt);
+            return;
+        end
+        d = uint8(raw(:));
+        c = crc32Of(d);
+        if ~isnan(c) && c ~= hex2dec(tok{3})
+            err = sprintf('CRC: DAQ %s, app %08X', upper(tok{3}), c);
+            d = uint8([]);
         end
     end
 
@@ -787,6 +815,7 @@ function DAQ_Calibration_App()
         end
         dlg = uiprogressdlg(filesFig, 'Title', 'Download', 'Message', 'Stopping the live stream...');
         bad = {};
+        notes = {};
         try
             pauseSerial();
         catch ME
@@ -805,11 +834,14 @@ function DAQ_Calibration_App()
             dlg.Message = sprintf('%d / %d: %s', k, numel(sel), localName);
             dlg.Value = 0;
             try
-                [data, ok, msg] = getFile(f.src, f.name, dlg);
+                [data, ok, msg, retries] = getFile(f, dlg);
             catch ME
-                data = uint8([]); ok = false; msg = ME.message;
-                pause(0.5);   % the DAQ can still send the rest of the file
+                data = uint8([]); ok = false; msg = ME.message; retries = 0;
+                pause(0.5);   % the DAQ can still send the rest of a chunk
                 flush(s);
+            end
+            if ok && retries > 0
+                notes{end+1} = sprintf('%s: OK, %d chunks were asked for again', localName, retries); %#ok<AGROW>
             end
             if ~isempty(data)
                 fid = fopen(fullfile(downloadDir, localName), 'w');
@@ -828,7 +860,9 @@ function DAQ_Calibration_App()
         close(dlg);
         refreshLocalFiles();
         if ~isempty(bad)
-            uialert(filesFig, strjoin(bad, newline), 'Download Problem');
+            uialert(filesFig, strjoin([bad, notes], newline), 'Download Problem');
+        elseif ~isempty(notes)
+            uialert(filesFig, strjoin(notes, newline), 'Download Done (with retries)', 'Icon', 'warning');
         end
     end
 

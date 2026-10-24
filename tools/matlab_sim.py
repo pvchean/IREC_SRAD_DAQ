@@ -7,7 +7,7 @@ Steps (the same order and bytes as the MATLAB app):
   1. "MATLAB PING" without a line end, wait 1.5 s, find the banner (Auto-Connect)
   2. live numbers come; "DAQS\\n" during the stream; parse the reply with the app's regex
   3. "STREAM OFF" -> "STREAM:OFF", then no more number lines
-  4. "FILES" -> list; "GET" of the newest PFS file and of each SD file -> frames, CRC-32 check
+  4. "FILES" -> list; CHUNK download of the newest PFS file and of each SD file, CRC-32 per chunk
   5. "STREAM ON" -> numbers come again
 """
 import re
@@ -27,6 +27,13 @@ def step(ok, text):
         sys.exit(1)
 
 
+def line(s, prefixes, timeout=5.0):
+    t = wait_line(s, prefixes, timeout)
+    if t is None:
+        raise TimeoutError(f"no reply {prefixes}")
+    return t
+
+
 def wait_line(s, prefixes, timeout=5.0):
     end = time.time() + timeout
     while time.time() < end:
@@ -34,6 +41,38 @@ def wait_line(s, prefixes, timeout=5.0):
         if t.startswith(prefixes):
             return t
     return None
+
+
+def get_chunks(s, src, name, start, chunk=16384, tries=5):
+    """Download with CHUNK requests. Returns (data, retries). A chunk with an error is asked for again."""
+    data, off, retries = bytearray(), start, 0
+    while True:
+        for t in range(tries):
+            s.write(f"CHUNK {src} {name} {off} {chunk}\n".encode())
+            hdr = line(s, ("CHUNK:",), 5.0)
+            m = re.match(r"CHUNK:(\d+) (\d+) ([0-9A-Fa-f]{8})", hdr)
+            err = hdr if hdr.startswith("CHUNK:ERR") else None
+            if not err and (not m or int(m.group(1)) != off):
+                err = f"bad reply {hdr!r}"
+            if not err:
+                n = int(m.group(2))
+                b = s.read(n)
+                if len(b) < n:
+                    err = f"only {len(b)} of {n} bytes"
+                elif zlib.crc32(b) != int(m.group(3), 16):
+                    err = f"CRC DAQ {m.group(3)} PC {zlib.crc32(b):08X}"
+            if not err:
+                break
+            retries += 1
+            print(f"    retry at offset {off}: {err}")
+            time.sleep(0.3)
+            s.reset_input_buffer()
+        else:
+            raise RuntimeError(f"offset {off}: {err}")
+        if n == 0:
+            return bytes(data), retries
+        data += b
+        off += n
 
 
 def main():
@@ -84,26 +123,12 @@ def main():
     pfs = [f for f in files if f[1] == "PFS"]
     todo = ([max(pfs, key=lambda f: int(f[2]))] if pfs else []) + [f for f in files if f[1] == "SD"]
     for f in todo:
-        s.write(f"GET {f[1]} {f[2]}\n".encode())
-        hdr = wait_line(s, ("GET:BEGIN", "GET:ERR"), 10)
-        step(hdr is not None and hdr.startswith("GET:BEGIN"), f"4c {hdr}")
-        data = bytearray()
+        start = int(f[5]) if f[1] == "PFS" and len(f) > 5 else 0
         t0 = time.time()
-        while True:
-            h = s.read(2)
-            step(len(h) == 2, "frame header")
-            n = h[0] | h[1] << 8
-            if n == 0:
-                break
-            b = s.read(n)
-            step(len(b) == n, "frame data")
-            data += b
-        tail = wait_line(s, ("GET:END",))
-        mm = re.search(r"bytes=(\d+) crc32=([0-9A-Fa-f]{8}) (\w+)", tail or "")
-        ok = bool(mm) and int(mm.group(1)) == len(data) and int(mm.group(2), 16) == zlib.crc32(data) and mm.group(3) == "OK"
+        data, retries = get_chunks(s, f[1], f[2], start)
         dt = time.time() - t0
-        step(ok, f"4d {f[1]} {f[2]}: {len(data)} B, {len(data) / max(dt, 1e-3) / 1024:.0f} KiB/s, {tail}, "
-                 f"PC crc32 {zlib.crc32(data):08X}, whole records: {len(data) % 8 == 0}")
+        step(retries == 0, f"4c {f[1]} {f[2]}: {len(data)} B (FILES said {f[3]}), "
+                           f"{len(data) / max(dt, 1e-3) / 1024:.0f} KiB/s, {retries} retries, whole records: {len(data) % 8 == 0}")
         if out:
             open(f"{out}/{f[1]}_{f[2]}.BIN", "wb").write(data)
 

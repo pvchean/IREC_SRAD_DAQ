@@ -23,7 +23,6 @@
 #include "stream.h"
 
 #define CHUNK 1024U                      /* multiple of sizeof(record_t) */
-#define FRAME 4096U                      /* GET frame size, multiple of sizeof(record_t) */
 #define SEEN_MS 3000U                    /* DAQS: a board is in the chain if it sent in this time */
 #define IDLE_MS 500                      /* a line without a line end runs after this idle time (as the sketch) */
 
@@ -84,7 +83,8 @@ static void do_daqs(void)
 }
 
 /* FILES: the PFS files and the SD files, one line each, for the MATLAB file list.
-     FILE PFS <file id> <bytes> <flags hex>     bytes = stored bytes (approximate if flag 0x0004 is clear)
+     FILE PFS <file id> <bytes> <flags hex> <start>   start = offset of the first whole record (for CHUNK);
+                                                      bytes = from start to the end (approximate if flag 0x0004 is clear)
      FILE SD <name> <bytes> */
 static void do_files(void)
 {
@@ -95,8 +95,9 @@ static void do_files(void)
     for (uint16_t i = 0; i < n; i++) {
         pfs_file_info_t fi;
         if (pfs_file_info(s_pfs, i, &fi) == PFS_OK) {
-            printf("FILE PFS %u %" PRIu64 " %04X\n", fi.file_id,
-                   fi.size_bytes > fi.first_offset ? fi.size_bytes - fi.first_offset : 0U, fi.flags);
+            uint64_t start = (fi.first_offset + sizeof(record_t) - 1) / sizeof(record_t) * sizeof(record_t);
+            printf("FILE PFS %u %lu %04X %lu\n", fi.file_id,
+                   (unsigned long)(fi.size_bytes > start ? fi.size_bytes - start : 0U), fi.flags, (unsigned long)start);
         }
     }
     DIR *d = sd_log_mounted() ? opendir("/sdcard") : NULL;
@@ -113,14 +114,15 @@ static void do_files(void)
     if (was_on) { stream_enable(true); }
 }
 
-/* ---- GET: send one file in binary frames ----
-     GET PFS <file id>     the records of a PFS file (from the first whole record)
-     GET SD <name>         an SD file as it is, for example GET SD F00012D3.BIN
-   Reply: the line "GET:BEGIN <source> <name> <approximate bytes>", then frames [u16 len, little endian]
-   [len bytes], then a frame with len 0, then the line "GET:END bytes=<n> crc32=<8 hex> OK|ERR".
-   crc32 = the zlib CRC-32 of all the bytes. An error before the first frame gives "GET:ERR <reason>".
-   The live stream stops and the log is muted while the file goes out. The stream starts again after. */
-static uint8_t s_frame[2 + FRAME];
+/* ---- CHUNK: one piece of a file, for the download (MATLAB app, tools/daq_get.py) ----
+     CHUNK PFS <file id> <offset> <max len>
+     CHUNK SD <name> <offset> <max len>          for example CHUNK SD F00012D3.BIN 0 16384
+   Reply: the line "CHUNK:<offset> <n> <crc32, 8 hex>", then n raw bytes. n = 0: the end of the file.
+   Error: "CHUNK:ERR <reason>". The offset is the file offset; a PFS file starts at the <start> value of FILES.
+   crc32 = the zlib CRC-32 of the n bytes. The host asks again for a chunk with a bad CRC, so one bad byte on
+   the USB link costs one chunk, not the file. The log is muted while the bytes go out. */
+#define CHUNK_MAX 16384U
+static uint8_t s_chunk[CHUNK_MAX];
 
 /* The driver puts a write in its TX ring buffer (4096 bytes) in one piece or not at all: a write larger than
    the ring buffer always fails. So write in pieces of USB_PIECE bytes. */
@@ -136,66 +138,47 @@ static bool usb_put(const uint8_t *p, size_t n)
     return true;
 }
 
-static bool send_frame(size_t len, uint32_t *crc, uint64_t *total)
-{
-    s_frame[0] = (uint8_t)len; s_frame[1] = (uint8_t)(len >> 8);
-    if (!usb_put(s_frame, 2 + len)) { return false; }
-    *crc = esp_rom_crc32_le(*crc, s_frame + 2, (uint32_t)len);   /* count only the bytes that went out */
-    *total += len;
-    return true;
-}
-
-static void do_get(const char *src, const char *name)
+static void do_chunk(const char *src, const char *name, const char *offs, const char *lens)
 {
     bool pfs = src && !strcmp(src, "PFS"), sd = src && !strcmp(src, "SD");
-    bool was_on = stream_enabled(), ok = true;
-    uint32_t crc = 0;
-    uint64_t total = 0;
-    pfs_file_info_t fi;
-    FILE *f = NULL;
-    uint64_t off = 0;
-    char path[48];
+    uint32_t off, want;
+    size_t n = 0;
 
-    if (!name || (!pfs && !sd)) { printf("GET:ERR use GET PFS <id> or GET SD <name>\n"); return; }
+    if (!lens || (!pfs && !sd)) { printf("CHUNK:ERR use CHUNK PFS|SD <file> <offset> <len>\n"); return; }
+    off = (uint32_t)strtoul(offs, NULL, 10);
+    want = (uint32_t)strtoul(lens, NULL, 10);
+    if (want > CHUNK_MAX) { want = CHUNK_MAX; }
     if (pfs) {
-        if (pfs_file_stat(s_pfs, (uint16_t)atoi(name), &fi) != PFS_OK) { printf("GET:ERR no PFS file %s\n", name); return; }
-        off = (fi.first_offset + sizeof(record_t) - 1) / sizeof(record_t) * sizeof(record_t);
+        uint16_t id = (uint16_t)atoi(name);
+        while (n < want) {                       /* pfs_read can give less than asked (a page end) */
+            size_t got = 0;
+            pfs_err_t e = pfs_read(s_pfs, id, off + n, s_chunk + n, want - n, &got);
+            if (e == PFS_ERR_EOF || (e == PFS_OK && got == 0)) { break; }
+            if (e != PFS_OK) { printf("CHUNK:ERR pfs_read error %d at offset %lu\n", (int)e, (unsigned long)(off + n)); return; }
+            n += got;
+        }
     } else {
-        if (strchr(name, '/') || strlen(name) > 12) { printf("GET:ERR bad name\n"); return; }
-        (void)sd_log_flush(2000);                       /* write the staged bytes and close the files */
+        char path[48];
+        FILE *f;
+        if (strchr(name, '/') || strlen(name) > 12) { printf("CHUNK:ERR bad name\n"); return; }
+        if (off == 0) { (void)sd_log_flush(2000); }     /* the first chunk: write the staged bytes first */
         snprintf(path, sizeof path, "/sdcard/%s", name);
         f = sd_log_mounted() ? fopen(path, "rb") : NULL;
-        if (!f) { printf("GET:ERR no SD file %s\n", name); return; }
+        if (!f) { printf("CHUNK:ERR no SD file %s\n", name); return; }
+        if (fseek(f, (long)off, SEEK_SET) == 0) { n = fread(s_chunk, 1, want, f); }
+        bool bad = ferror(f) != 0;
+        fclose(f);
+        if (bad) { printf("CHUNK:ERR SD read error at offset %lu\n", (unsigned long)off); return; }
     }
-    stream_enable(false);
-    esp_log_level_set("*", ESP_LOG_NONE);              /* a log line in the frames would break them */
-    if (pfs) { printf("GET:BEGIN PFS %u %" PRIu64 "\n", fi.file_id, fi.size_bytes > off ? fi.size_bytes - off : 0U); }
-    else { fseek(f, 0, SEEK_END); printf("GET:BEGIN SD %s %ld\n", name, ftell(f)); fseek(f, 0, SEEK_SET); }
-    fflush(stdout);
 
-    for (;;) {
-        size_t got = 0;
-        if (pfs) {
-            pfs_err_t e = pfs_read(s_pfs, fi.file_id, off, s_frame + 2, FRAME, &got);
-            if (e == PFS_ERR_EOF) { break; }
-            if (e != PFS_OK) { ok = false; break; }
-            got -= got % sizeof(record_t);              /* whole records; the rest comes in the next read */
-            off += got;
-        } else {
-            got = fread(s_frame + 2, 1, FRAME, f);
-            if (ferror(f)) { ok = false; }
-        }
-        if (got == 0) { break; }
-        if (!send_frame(got, &crc, &total)) { ok = false; break; }
-        vTaskDelay(1);                                   /* give the other tasks time */
-    }
-    if (f) { fclose(f); }
-    s_frame[0] = s_frame[1] = 0;
-    if (!usb_put(s_frame, 2)) { ok = false; }
-    printf("GET:END bytes=%" PRIu64 " crc32=%08" PRIX32 " %s\n", total, crc, ok ? "OK" : "ERR");
+    bool was_on = stream_enabled();
+    if (was_on) { stream_enable(false); }               /* no number lines inside the chunk */
+    esp_log_level_set("*", ESP_LOG_NONE);              /* no log line inside the chunk */
+    printf("CHUNK:%lu %u %08lX\n", (unsigned long)off, (unsigned)n,
+           (unsigned long)(n ? esp_rom_crc32_le(0, s_chunk, (uint32_t)n) : 0U));
     fflush(stdout);
-    esp_log_level_set("*", ESP_LOG_INFO);
-    if (was_on) { stream_enable(true); }
+    if (n) { (void)usb_put(s_chunk, n); }               /* a failure shows on the host as a short chunk */
+    if (was_on) { stream_enable(true); } else { esp_log_level_set("*", ESP_LOG_INFO); }
 }
 
 static void do_list(void)
@@ -430,7 +413,11 @@ static void run(char *line)
     }
     else if (!strcmp(tok, "DAQS")) { do_daqs(); }
     else if (!strcmp(tok, "FILES")) { do_files(); }
-    else if (!strcmp(tok, "GET")) { char *a = strtok(NULL, " \t"), *b = a ? strtok(NULL, " \t") : NULL; do_get(a, b); }
+    else if (!strcmp(tok, "CHUNK")) {
+        char *a = strtok(NULL, " \t"), *b = a ? strtok(NULL, " \t") : NULL;
+        char *c = b ? strtok(NULL, " \t") : NULL, *d = c ? strtok(NULL, " \t") : NULL;
+        do_chunk(a, b, c, d);
+    }
     else if (!strcmp(tok, "STATUS")) { printf("STATUS:OK (SD Overflows: %lu)\n", (unsigned long)sd_log_dropped()); }   /* as the sketch */
     else if (!strcmp(tok, "INFO")) { do_info(); }
     else if (!strcmp(tok, "LIST")) { do_list(); }
@@ -475,7 +462,7 @@ void cmd_start(pfs_ctx_t *pfs)
 {
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     s_pfs = pfs;
-    cfg.tx_buffer_size = 4096;                     /* GET frames */
+    cfg.tx_buffer_size = 4096;                     /* CHUNK data (written in 1 KB pieces) */
     usb_serial_jtag_driver_install(&cfg);
     usb_serial_jtag_vfs_use_driver();
     xTaskCreatePinnedToCore(cmd_task, "cmd", 8192, NULL, 1, NULL, 0);
