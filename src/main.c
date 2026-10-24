@@ -120,10 +120,13 @@ static void led_task(void *a)
 static void toggle_task(void *a)
 {
     (void)a;
-    gpio_set_direction(I2C1_RDY_PIN, GPIO_MODE_OUTPUT);
-    for (int level = 0;; level ^= 1) {
+    gpio_reset_pin(I2C1_RDY_PIN);
+    gpio_set_direction(I2C1_RDY_PIN, GPIO_MODE_INPUT_OUTPUT);     /* output, and the pad level can be read back */
+    ESP_LOGI(TAG, "toggle: driving GPIO %d, %d ms per state", I2C1_RDY_PIN, DAQ_TOGGLE_MS);
+    for (int level = 0, n = 0;; level ^= 1, n++) {
         gpio_set_level(I2C1_RDY_PIN, level);
         vTaskDelay(pdMS_TO_TICKS(DAQ_TOGGLE_MS));
+        if (n < 8 || n % 20 == 0) { ESP_LOGI(TAG, "toggle: set=%d pad=%d", level, gpio_get_level(I2C1_RDY_PIN)); }
     }
 }
 #endif
