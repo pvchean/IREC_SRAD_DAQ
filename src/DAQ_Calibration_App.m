@@ -201,6 +201,9 @@ function DAQ_Calibration_App()
     end
 
     function connectDAQ(~, ~)
+        if xferBusy
+            return; % a file transfer uses the port
+        end
         % Clean up any prior connection
         if ~isempty(daqTimer) && isvalid(daqTimer)
             stop(daqTimer);
@@ -210,9 +213,7 @@ function DAQ_Calibration_App()
             stop(chainTimer);
             delete(chainTimer);
         end
-        if ~isempty(s) && isvalid(s)
-            clear s;
-        end
+        closePort();
         selfId = -1;
         seenIds = [];
         updateChainLabel();
@@ -222,6 +223,7 @@ function DAQ_Calibration_App()
         ports = serialportlist("available");
 
         for i = 1:length(ports)
+            temp_s = [];
             try
                 temp_s = serialport(ports(i), 115200, 'Timeout', 3);
                 write(temp_s, "MATLAB PING", "string");
@@ -250,9 +252,12 @@ function DAQ_Calibration_App()
                         return;
                     end
                 end
-                clear temp_s;
+                delete(temp_s); % not the DAQ: free the port
             catch
                 % Ignore and inspect next port
+                if ~isempty(temp_s) && isvalid(temp_s)
+                    delete(temp_s);
+                end
             end
         end
         statusLbl.Text = 'Status: DAQ Not Found';
@@ -260,7 +265,7 @@ function DAQ_Calibration_App()
 
     function readSerialBatch(~, ~)
         try
-            if isempty(s) || ~isvalid(s)
+            if xferBusy || isempty(s) || ~isvalid(s)
                 return;
             end
 
@@ -283,13 +288,15 @@ function DAQ_Calibration_App()
             completeLines = fullStr(1:lastLF);
             serialCarryover = fullStr(lastLF+1:end);
 
-            % Reply lines (they start with a letter, e.g. DAQS:...) come between the number lines
-            txtLines = regexp(completeLines, '^[A-Za-z][^\r\n]*', 'match', 'lineanchors');
+            % Text lines (replies such as DAQS:..., log lines) come between the number lines.
+            % A text line starts with a character that cannot start a number.
+            txtRe = '^[^0-9+\-.\r\n][^\r\n]*';
+            txtLines = regexp(completeLines, txtRe, 'match', 'lineanchors');
             if ~isempty(txtLines)
                 for k = 1:numel(txtLines)
                     handleReply(strtrim(txtLines{k}));
                 end
-                completeLines = regexprep(completeLines, '^[A-Za-z][^\r\n]*', '', 'lineanchors');
+                completeLines = regexprep(completeLines, txtRe, '', 'lineanchors');
             end
 
             % Vectorized C-speed float parsing of all samples in this chunk
@@ -340,7 +347,7 @@ function DAQ_Calibration_App()
                 if ~isempty(chainTimer) && isvalid(chainTimer)
                     stop(chainTimer);
                 end
-                s = [];
+                closePort();
                 selfId = -1;
                 seenIds = [];
                 updateChainLabel();
@@ -465,8 +472,11 @@ function DAQ_Calibration_App()
         tok = regexp(t, 'DAQS:SELF=(\d+) SEEN=([\d,]*)', 'tokens', 'once');
         if ~isempty(tok)
             selfId = str2double(tok{1});
-            ids = str2double(strsplit(tok{2}, ','));
-            seenIds = ids(~isnan(ids));
+            idText = regexp(tok{2}, '\d+', 'match'); % SEEN can be empty
+            seenIds = zeros(1, numel(idText));
+            for k = 1:numel(idText)
+                seenIds(k) = str2double(idText{k});
+            end
             updateChainLabel();
         end
     end
@@ -505,22 +515,38 @@ function DAQ_Calibration_App()
     % =====================================================================
     % --- Serial transfer helpers (FILES and GET commands) ---
     % =====================================================================
+    function closePort()
+        if ~isempty(s) && isvalid(s)
+            delete(s); % closes the port
+        end
+        s = [];
+    end
+
     function pauseSerial()
+        % Stop the timers and the live stream: after "STREAM:OFF" only replies come
         xferBusy = true;
         if ~isempty(daqTimer) && isvalid(daqTimer), stop(daqTimer); end
         if ~isempty(chainTimer) && isvalid(chainTimer), stop(chainTimer); end
+        writeline(s, "STREAM OFF");
+        waitLine({'STREAM:OFF'}, 5);
         flush(s);
         serialCarryover = '';
     end
 
     function resumeSerial()
+        % Start the live stream and the timers again (also after an error)
         xferBusy = false;
         if isempty(s) || ~isvalid(s)
             return;
         end
+        try
+            flush(s);
+            writeline(s, "STREAM ON");
+        catch
+        end
         serialCarryover = '';
-        if ~isempty(daqTimer) && isvalid(daqTimer), start(daqTimer); end
-        if ~isempty(chainTimer) && isvalid(chainTimer), start(chainTimer); end
+        if ~isempty(daqTimer) && isvalid(daqTimer) && strcmp(char(daqTimer.Running), 'off'), start(daqTimer); end
+        if ~isempty(chainTimer) && isvalid(chainTimer) && strcmp(char(chainTimer.Running), 'off'), start(chainTimer); end
     end
 
     function t = waitLine(prefixes, timeoutS)
@@ -550,10 +576,9 @@ function DAQ_Calibration_App()
     end
 
     function files = queryFiles()
+        % Call between pauseSerial() and resumeSerial().
         % FILES reply: "FILE PFS <id> <bytes> <flags>" and "FILE SD <name> <bytes>", then "FILES:END"
         files = struct('src', {}, 'name', {}, 'bytes', {});
-        pauseSerial();
-        cleanup = onCleanup(@resumeSerial);
         writeline(s, "FILES");
         waitLine({'FILES:BEGIN'}, 5);
         while true
@@ -569,9 +594,8 @@ function DAQ_Calibration_App()
     end
 
     function [data, ok, msg] = getFile(src, name, dlg)
+        % Call between pauseSerial() and resumeSerial().
         % GET reply: "GET:BEGIN ...", frames [u16 len LE][len bytes], a 0 frame, "GET:END bytes=<n> crc32=<hex> OK|ERR"
-        pauseSerial();
-        cleanup = onCleanup(@resumeSerial);
         writeline(s, sprintf('GET %s %s', src, name));
         hdr = waitLine({'GET:BEGIN', 'GET:ERR'}, 10);
         if startsWith(hdr, 'GET:ERR')
@@ -621,9 +645,14 @@ function DAQ_Calibration_App()
 
     function c = crc32Of(data)
         % zlib CRC-32 (the same as esp_rom_crc32_le with start value 0). NaN if Java is not available.
+        if isempty(data)
+            c = 0;
+            return;
+        end
         try
+            b = typecast(data(:)', 'int8');
             j = java.util.zip.CRC32;
-            j.update(typecast(data(:), 'int8'));
+            j.update(b, 0, numel(b)); % the (byte[], offset, length) form: always the byte[] method
             c = double(j.getValue());
         catch
             c = NaN;
@@ -700,16 +729,22 @@ function DAQ_Calibration_App()
     end
 
     function refreshBoardFiles(~, ~)
+        if xferBusy
+            return;
+        end
         if isempty(s) || ~isvalid(s)
             uialert(filesFig, 'Connect to a DAQ first (Auto-Connect).', 'Not Connected');
             return;
         end
         try
+            pauseSerial();
             boardFiles = queryFiles();
         catch ME
+            resumeSerial();
             uialert(filesFig, ME.message, 'File List Error');
             return;
         end
+        resumeSerial();
         items = cell(1, numel(boardFiles));
         for k = 1:numel(boardFiles)
             f = boardFiles(k);
@@ -725,6 +760,9 @@ function DAQ_Calibration_App()
     end
 
     function downloadSelected(~, ~)
+        if xferBusy
+            return;
+        end
         if isempty(s) || ~isvalid(s)
             uialert(filesFig, 'Connect to a DAQ first (Auto-Connect).', 'Not Connected');
             return;
@@ -737,8 +775,16 @@ function DAQ_Calibration_App()
         if ~exist(downloadDir, 'dir')
             mkdir(downloadDir);
         end
-        dlg = uiprogressdlg(filesFig, 'Title', 'Download', 'Message', '');
+        dlg = uiprogressdlg(filesFig, 'Title', 'Download', 'Message', 'Stopping the live stream...');
         bad = {};
+        try
+            pauseSerial();
+        catch ME
+            resumeSerial();
+            close(dlg);
+            uialert(filesFig, ME.message, 'Download Problem');
+            return;
+        end
         for k = 1:numel(sel)
             f = boardFiles(sel(k));
             if strcmp(f.src, 'PFS')
@@ -752,16 +798,23 @@ function DAQ_Calibration_App()
                 [data, ok, msg] = getFile(f.src, f.name, dlg);
             catch ME
                 data = uint8([]); ok = false; msg = ME.message;
+                pause(0.5);   % the DAQ can still send the rest of the file
+                flush(s);
             end
             if ~isempty(data)
                 fid = fopen(fullfile(downloadDir, localName), 'w');
-                fwrite(fid, data, 'uint8');
-                fclose(fid);
+                if fid == -1
+                    ok = false; msg = 'cannot write the file in the download folder';
+                else
+                    fwrite(fid, data, 'uint8');
+                    fclose(fid);
+                end
             end
             if ~ok
                 bad{end+1} = sprintf('%s: %s', localName, msg); %#ok<AGROW>
             end
         end
+        resumeSerial();
         close(dlg);
         refreshLocalFiles();
         if ~isempty(bad)
@@ -798,9 +851,13 @@ function DAQ_Calibration_App()
         updateRangePlot();
     end
 
-    function [t, raw, seq] = loadRecords(path)
+    function [t, raw, seq] = loadRecords(fpath)
         % 8-byte records, little endian: u32 timestamp_us, i16 reading, u16 seq
-        fid = fopen(path, 'r');
+        fid = fopen(fpath, 'r');
+        if fid == -1
+            t = []; raw = []; seq = [];
+            return;
+        end
         bytes = fread(fid, inf, 'uint8=>uint8');
         fclose(fid);
         n = floor(numel(bytes) / 8);
@@ -886,7 +943,7 @@ function DAQ_Calibration_App()
         grid(axF, 'on');
 
         ds = mod(diff(plotSeq(k)), 65536);
-        lost = sum(ds(ds ~= 1) - 1);
+        lost = sum(ds(ds > 1) - 1);
         statsLbl.Text = sprintf('%d samples  %.3f s   mean %.4f  min %.4f  max %.4f  std %.4f   lost samples %d', ...
             m, tk(end) - tk(1), mean(yk), min(yk), max(yk), std(yk), lost);
     end
@@ -920,9 +977,7 @@ function DAQ_Calibration_App()
         if ~isempty(filesFig) && isvalid(filesFig)
             delete(filesFig);
         end
-        if ~isempty(s) && isvalid(s)
-            clear s;
-        end
+        closePort();
         if liveDataFile ~= -1
             fclose(liveDataFile);
         end
