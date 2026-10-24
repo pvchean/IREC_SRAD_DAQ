@@ -84,14 +84,10 @@ static void send_own(void)
     s_batch_n = 0;
 }
 
-void chain_push_ads(const record_t *r, bool recording)
+void chain_push_ads(const record_t *r)
 {
-    if (recording) {
-        memcpy(s_batch + s_batch_n * sizeof *r, r, sizeof *r);
-        if (++s_batch_n == OWN_RECS) { send_own(); }
-    } else if (s_batch_n) {
-        send_own();
-    }
+    memcpy(s_batch + s_batch_n * sizeof *r, r, sizeof *r);
+    if (++s_batch_n == OWN_RECS) { send_own(); }
 }
 
 static void shift(rx_t *s, size_t k)
@@ -107,7 +103,7 @@ static void handle(int port, const uint8_t *pkt, size_t len)
     if (dev == io_addr()) { s_st.own_dropped++; return; }
     send_to(1 - port, pkt, len);                  /* repeat on the other port */
     s_st.forwarded++;
-    if (type == CHAIN_TYPE_ADS) { sd_log_push_remote(dev, pkt + HDR, (size_t)cnt * rec_size(type)); }
+    if (type == CHAIN_TYPE_ADS && rec_get()) {   /* recording = saving */ sd_log_push_remote(dev, pkt + HDR, (size_t)cnt * rec_size(type)); }
 }
 
 /* One received byte. The state is the buffer: wrong bytes at the start are removed until a whole valid

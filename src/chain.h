@@ -28,8 +28,8 @@ typedef struct {
 } chain_stats_t;
 
 void chain_start(void);
-/* Call for each ADS1115 sample. When not recording, a partial packet is sent. Never waits. */
-void chain_push_ads(const record_t *r, bool recording);
+/* Call for each ADS1115 sample, also when the board is not recording (recording only means saving). Never waits. */
+void chain_push_ads(const record_t *r);
 void chain_get_stats(chain_stats_t *out);
 
 #endif

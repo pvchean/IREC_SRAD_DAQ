@@ -39,10 +39,10 @@ static void on_sample(const ads_sample_t *s)
 {
     record_t r = { s->timestamp_us, s->reading, s_seq++ };
     stream_push(&r);                                           /* live readings, only after MATLAB PING */
-    if (!rec_get()) { chain_push_ads(&r, false); return; }     /* not recording: the sample is not stored */
+    chain_push_ads(&r);                                        /* to the other boards, also when not recording */
+    if (!rec_get()) { return; }                                /* recording = saving: PFS and SD only while on */
     (void)pfs_ingest(s_pfs, (const uint8_t *)&r, sizeof r);   /* never waits; the status counts drops */
     sd_log_push(&r);                                           /* the backup copy */
-    chain_push_ads(&r, true);                                  /* to the other boards */
 }
 
 #ifdef DAQ_SIM

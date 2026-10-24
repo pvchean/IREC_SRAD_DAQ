@@ -38,3 +38,8 @@ Same replies as the Arduino sketch: `MATLAB PING` (banner, then live voltages), 
 `FLUSH` (`SD_FLUSHED:OK`). New: `PING` (banner only), `INFO` (details), `PFSFLUSH` (close the PFS file), `STREAM OFF`,
 `REC ON|OFF`, `LIST`, `SDLS`,
 `CHECK [file [n]]`, `DUMP file offset len`, `LED 0..255`.
+
+## Recording
+"Recording" means saving. With recording off, the board still samples, streams to USB after `MATLAB PING`, and sends
+its own packets to the chain. It also repeats the packets of other boards. With recording on, it also saves its own
+samples to PFS and the SD card, and saves the packets of other boards to the SD card.
