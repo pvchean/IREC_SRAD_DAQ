@@ -9,6 +9,8 @@
 
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#include "esp_log.h"
+#include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,6 +23,9 @@
 #include "stream.h"
 
 #define CHUNK 1024U                      /* multiple of sizeof(record_t) */
+#define FRAME 4096U                      /* GET frame size, multiple of sizeof(record_t) */
+#define SEEN_MS 3000U                    /* DAQS: a board is in the chain if it sent in this time */
+#define IDLE_MS 500                      /* a line without a line end runs after this idle time (as the sketch) */
 
 static pfs_ctx_t *s_pfs;
 
@@ -41,6 +46,10 @@ static void do_info(void)
     printf("CHAIN: tx=%" PRIu32 " rx1=%" PRIu32 "/%" PRIu32 " rx2=%" PRIu32 "/%" PRIu32 " (ok/bad) fwd=%" PRIu32
            " tx_drop=%" PRIu32 " own_dropped=%" PRIu32 "\n",
            cs.tx_packets, cs.rx_ok[0], cs.rx_bad[0], cs.rx_ok[1], cs.rx_bad[1], cs.forwarded, cs.tx_drop, cs.own_dropped);
+    uint8_t fl[8], m = chain_seen(SEEN_MS, fl);
+    for (int i = 0; i < 8; i++) {                  /* heartbeat flags: 1 rec, 2 auto, 4 sensor, 8 SD */
+        if (m & (1U << i)) { printf("DAQ %d flags=0x%02X\n", i, fl[i]); }
+    }
 }
 
 /* List the files on the SD card with their sizes. */
@@ -57,6 +66,131 @@ static void do_sdls(void)
     }
     closedir(d);
     printf("SDLS:END\n");
+}
+
+/* DAQS: the boards in the chain. One line, one USB write, so it stays whole between the number lines. */
+static void do_daqs(void)
+{
+    char line[64];
+    int len = snprintf(line, sizeof line, "DAQS:SELF=%u SEEN=", io_addr());
+    uint8_t m = chain_seen(SEEN_MS, NULL);
+    bool first = true;
+    for (int i = 0; i < 8; i++) {
+        if (m & (1U << i)) { len += snprintf(line + len, sizeof line - len, first ? "%d" : ",%d", i); first = false; }
+    }
+    len += snprintf(line + len, sizeof line - len, "\r\n");
+    fflush(stdout);
+    usb_serial_jtag_write_bytes(line, (size_t)len, pdMS_TO_TICKS(50));
+}
+
+/* FILES: the PFS files and the SD files, one line each, for the MATLAB file list.
+     FILE PFS <file id> <bytes> <flags hex>     bytes = stored bytes (approximate if flag 0x0004 is clear)
+     FILE SD <name> <bytes> */
+static void do_files(void)
+{
+    uint16_t n = pfs_file_count(s_pfs);
+    bool was_on = stream_enabled();
+    stream_enable(false);                          /* no number lines inside the file lines */
+    printf("FILES:BEGIN\n");
+    for (uint16_t i = 0; i < n; i++) {
+        pfs_file_info_t fi;
+        if (pfs_file_info(s_pfs, i, &fi) == PFS_OK) {
+            printf("FILE PFS %u %" PRIu64 " %04X\n", fi.file_id,
+                   fi.size_bytes > fi.first_offset ? fi.size_bytes - fi.first_offset : 0U, fi.flags);
+        }
+    }
+    DIR *d = sd_log_mounted() ? opendir("/sdcard") : NULL;
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) {
+        struct stat sb;
+        char p[300];
+        snprintf(p, sizeof p, "/sdcard/%s", e->d_name);
+        if (stat(p, &sb) == 0 && S_ISREG(sb.st_mode)) { printf("FILE SD %s %ld\n", e->d_name, (long)sb.st_size); }
+    }
+    if (d) { closedir(d); }
+    printf("FILES:END\n");
+    fflush(stdout);
+    if (was_on) { stream_enable(true); }
+}
+
+/* ---- GET: send one file in binary frames ----
+     GET PFS <file id>     the records of a PFS file (from the first whole record)
+     GET SD <name>         an SD file as it is, for example GET SD F00012D3.BIN
+   Reply: the line "GET:BEGIN <source> <name> <approximate bytes>", then frames [u16 len, little endian]
+   [len bytes], then a frame with len 0, then the line "GET:END bytes=<n> crc32=<8 hex> OK|ERR".
+   crc32 = the zlib CRC-32 of all the bytes. An error before the first frame gives "GET:ERR <reason>".
+   The live stream stops and the log is muted while the file goes out. The stream starts again after. */
+static uint8_t s_frame[2 + FRAME];
+
+static bool usb_put(const uint8_t *p, size_t n)
+{
+    while (n) {
+        int w = usb_serial_jtag_write_bytes(p, n, pdMS_TO_TICKS(3000));
+        if (w <= 0) { return false; }          /* the host does not read */
+        p += w; n -= (size_t)w;
+    }
+    return true;
+}
+
+static bool send_frame(size_t len, uint32_t *crc, uint64_t *total)
+{
+    s_frame[0] = (uint8_t)len; s_frame[1] = (uint8_t)(len >> 8);
+    *crc = esp_rom_crc32_le(*crc, s_frame + 2, (uint32_t)len);
+    *total += len;
+    return usb_put(s_frame, 2 + len);
+}
+
+static void do_get(const char *src, const char *name)
+{
+    bool pfs = src && !strcmp(src, "PFS"), sd = src && !strcmp(src, "SD");
+    bool was_on = stream_enabled(), ok = true;
+    uint32_t crc = 0;
+    uint64_t total = 0;
+    pfs_file_info_t fi;
+    FILE *f = NULL;
+    uint64_t off = 0;
+    char path[48];
+
+    if (!name || (!pfs && !sd)) { printf("GET:ERR use GET PFS <id> or GET SD <name>\n"); return; }
+    if (pfs) {
+        if (pfs_file_stat(s_pfs, (uint16_t)atoi(name), &fi) != PFS_OK) { printf("GET:ERR no PFS file %s\n", name); return; }
+        off = (fi.first_offset + sizeof(record_t) - 1) / sizeof(record_t) * sizeof(record_t);
+    } else {
+        if (strchr(name, '/') || strlen(name) > 12) { printf("GET:ERR bad name\n"); return; }
+        (void)sd_log_flush(2000);                       /* write the staged bytes and close the files */
+        snprintf(path, sizeof path, "/sdcard/%s", name);
+        f = sd_log_mounted() ? fopen(path, "rb") : NULL;
+        if (!f) { printf("GET:ERR no SD file %s\n", name); return; }
+    }
+    stream_enable(false);
+    esp_log_level_set("*", ESP_LOG_NONE);              /* a log line in the frames would break them */
+    if (pfs) { printf("GET:BEGIN PFS %u %" PRIu64 "\n", fi.file_id, fi.size_bytes > off ? fi.size_bytes - off : 0U); }
+    else { fseek(f, 0, SEEK_END); printf("GET:BEGIN SD %s %ld\n", name, ftell(f)); fseek(f, 0, SEEK_SET); }
+    fflush(stdout);
+
+    for (;;) {
+        size_t got = 0;
+        if (pfs) {
+            pfs_err_t e = pfs_read(s_pfs, fi.file_id, off, s_frame + 2, FRAME, &got);
+            if (e == PFS_ERR_EOF) { break; }
+            if (e != PFS_OK) { ok = false; break; }
+            got -= got % sizeof(record_t);              /* whole records; the rest comes in the next read */
+            off += got;
+        } else {
+            got = fread(s_frame + 2, 1, FRAME, f);
+            if (ferror(f)) { ok = false; }
+        }
+        if (got == 0) { break; }
+        if (!send_frame(got, &crc, &total)) { ok = false; break; }
+        vTaskDelay(1);                                   /* give the other tasks time */
+    }
+    if (f) { fclose(f); }
+    s_frame[0] = s_frame[1] = 0;
+    if (!usb_put(s_frame, 2)) { ok = false; }
+    printf("GET:END bytes=%" PRIu64 " crc32=%08" PRIX32 " %s\n", total, crc, ok ? "OK" : "ERR");
+    fflush(stdout);
+    esp_log_level_set("*", ESP_LOG_INFO);
+    if (was_on) { stream_enable(true); }
 }
 
 static void do_list(void)
@@ -284,7 +418,14 @@ static void run(char *line)
         if (a) { long v = strtol(a, NULL, 10); led_set_brightness((uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v)); }
         printf("LED:%u\n", led_get_brightness());
     }
-    else if (!strcmp(tok, "STREAM")) { stream_enable(false); printf("STREAM:OFF\n"); }
+    else if (!strcmp(tok, "STREAM")) {             /* STREAM ON | STREAM OFF */
+        char *a = strtok(NULL, " \t");
+        stream_enable(a && !strcmp(a, "ON"));
+        if (!stream_enabled()) { printf("STREAM:OFF\n"); }
+    }
+    else if (!strcmp(tok, "DAQS")) { do_daqs(); }
+    else if (!strcmp(tok, "FILES")) { do_files(); }
+    else if (!strcmp(tok, "GET")) { char *a = strtok(NULL, " \t"), *b = a ? strtok(NULL, " \t") : NULL; do_get(a, b); }
     else if (!strcmp(tok, "STATUS")) { printf("STATUS:OK (SD Overflows: %lu)\n", (unsigned long)sd_log_dropped()); }   /* as the sketch */
     else if (!strcmp(tok, "INFO")) { do_info(); }
     else if (!strcmp(tok, "LIST")) { do_list(); }
@@ -316,7 +457,10 @@ static void cmd_task(void *arg)
     (void)arg;
     for (;;) {
         uint8_t c;
-        if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(100)) != 1) { continue; }
+        if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(IDLE_MS)) != 1) {
+            if (n) { line[n] = 0; n = 0; run(line); }   /* MATLAB writes "MATLAB PING" without a line end */
+            continue;
+        }
         if (c == '\n' || c == '\r') { line[n] = 0; n = 0; run(line); }
         else if (n < sizeof line - 1) { line[n++] = (char)c; }
     }
@@ -326,6 +470,7 @@ void cmd_start(pfs_ctx_t *pfs)
 {
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     s_pfs = pfs;
+    cfg.tx_buffer_size = 4096;                     /* GET frames */
     usb_serial_jtag_driver_install(&cfg);
     usb_serial_jtag_vfs_use_driver();
     xTaskCreatePinnedToCore(cmd_task, "cmd", 8192, NULL, 1, NULL, 0);

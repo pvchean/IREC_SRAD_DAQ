@@ -30,14 +30,26 @@ A new PFS file starts at each boot (and after `FLUSH`), so the file ID counts th
 ## Daisy chain (UART1 pins 42/41, UART2 pins 40/39, 8N1, `CHAIN_BAUD`)
 Line topology. A valid packet from one port is repeated on the other. The own device ID is dropped.
 `A5 5A | device u8 | type u8 | count u8 | count records | CRC32 u32` (CRC32 = `esp_rom_crc32_le(0, ...)` over
-device, type, count, records). Type 1 = ADS1115 (8-byte record), type 2 = load cell (9 bytes, reserved).
+device, type, count, records). Type 1 = ADS1115 (8-byte record), type 2 = load cell (9 bytes, reserved),
+type 3 = heartbeat (1-byte record: flags 1 recording, 2 auto mode, 4 sensor OK, 8 SD card), sent each second.
+The heartbeat lets the other boards see a board also when its sensor sends nothing (command `DAQS`).
 The baud table is in `src/board.h`.
 
 ## USB serial commands (115200)
 Same replies as the Arduino sketch: `MATLAB PING` (banner, then live voltages), `STATUS` (`STATUS:OK (SD Overflows: n)`),
 `FLUSH` (`SD_FLUSHED:OK`). New: `PING` (banner only), `INFO` (details), `PFSFLUSH` (close the PFS file), `STREAM OFF`,
 `REC ON|OFF`, `LIST`, `SDLS`,
-`CHECK [file [n]]`, `DUMP file offset len`, `LED 0..255`.
+`CHECK [file [n]]`, `DUMP file offset len`, `LED 0..255`, `STREAM ON`.
+A line without a line end runs after 500 ms (as the sketch: MATLAB sends `MATLAB PING` without `\n`).
+
+For the MATLAB app (`src/DAQ_Calibration_App.m`, button *Files & Plot*) and `tools/daq_get.py`:
+- `DAQS` → `DAQS:SELF=<own ID> SEEN=<ID>,<ID>` — the boards that sent a packet in the last 3 s.
+  This reply is one line also while the live stream is on.
+- `FILES` → `FILES:BEGIN`, `FILE PFS <file id> <bytes> <flags hex>` and `FILE SD <name> <bytes>` lines, `FILES:END`.
+- `GET PFS <file id>` or `GET SD <name>` → `GET:BEGIN <src> <name> <approx bytes>`, then binary frames
+  `[u16 len, little endian][len bytes]`, a frame with len 0, then `GET:END bytes=<n> crc32=<8 hex> OK|ERR`
+  (zlib CRC-32). Errors before the data: `GET:ERR <reason>`. The live stream stops during the transfer and starts
+  again after it. The data is the same 8-byte records as above (a PFS file starts at its first whole record).
 
 ## Recording
 "Recording" means saving. With recording off, the board still samples, streams to USB after `MATLAB PING`, and sends

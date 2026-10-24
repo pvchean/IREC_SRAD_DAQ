@@ -7,8 +7,10 @@
 #include "esp_rom_crc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/message_buffer.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "ads1115.h"
 #include "board.h"
 #include "io.h"
 #include "sd_log.h"
@@ -21,6 +23,7 @@
 #define MAX_PKT      (HDR + MAX_RECS * 9U + CRC_LEN)
 #define OWN_RECS     16U
 #define MB_SIZE      4096U
+#define HELLO_MS     1000U                /* heartbeat interval */
 
 #ifdef DAQ_CHAIN_SELFTEST
 /* Test build: UART1 is looped back inside the chip, and the board sends as the device (ID xor 1). It then
@@ -38,7 +41,11 @@ static const int s_rx_pin[2] = { SERIAL1_RX_PIN, SERIAL2_RX_PIN };
 static MessageBufferHandle_t s_mb[2];           /* packets waiting for TX, per port */
 static StaticMessageBuffer_t s_mb_struct[2];
 static uint8_t s_mb_store[2][MB_SIZE + 1];
+static SemaphoreHandle_t s_tx_lock;             /* a message buffer allows one writer only; three tasks send */
+static StaticSemaphore_t s_tx_lock_struct;
 static chain_stats_t s_st;
+static volatile TickType_t s_seen[8];           /* last valid packet of each device ID; 0 = never */
+static volatile uint8_t s_flags[8];             /* last heartbeat flags of each device ID */
 
 typedef struct { uint8_t buf[MAX_PKT + 4]; size_t n; } rx_t;
 static rx_t s_rx[2];
@@ -48,14 +55,28 @@ static unsigned s_batch_n;
 
 void chain_get_stats(chain_stats_t *out) { *out = s_st; }
 
+uint8_t chain_seen(uint32_t max_age_ms, uint8_t flags[8])
+{
+    TickType_t now = xTaskGetTickCount();
+    uint8_t mask = 0;
+    for (int i = 0; i < 8; i++) {
+        TickType_t t = s_seen[i];
+        if (t && now - t <= pdMS_TO_TICKS(max_age_ms)) { mask |= (uint8_t)(1U << i); }
+        if (flags) { flags[i] = s_flags[i]; }
+    }
+    return mask;
+}
+
 static size_t rec_size(uint8_t type)
 {
-    return type == CHAIN_TYPE_ADS ? 8U : type == CHAIN_TYPE_LOADCELL ? 9U : 0U;
+    return type == CHAIN_TYPE_ADS ? 8U : type == CHAIN_TYPE_LOADCELL ? 9U : type == CHAIN_TYPE_HELLO ? 1U : 0U;
 }
 
 static void send_to(int port, const uint8_t *pkt, size_t len)
 {
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);       /* held for one copy only */
     if (xMessageBufferSend(s_mb[port], pkt, len, 0) != len) { s_st.tx_drop++; }
+    xSemaphoreGive(s_tx_lock);
 }
 
 static void tx_task(void *arg)
@@ -71,17 +92,35 @@ static void tx_task(void *arg)
 static void put_u32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 static uint32_t get_u32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 
-static void send_own(void)
+/* Make one packet with the own ID and send it out of both ports. */
+static void send_pkt(uint8_t type, uint8_t count, const uint8_t *data, size_t pay)
 {
     uint8_t pkt[HDR + OWN_RECS * sizeof(record_t) + CRC_LEN];
-    size_t pay = s_batch_n * sizeof(record_t), len = HDR + pay + CRC_LEN;
-    pkt[0] = SYNC0; pkt[1] = SYNC1; pkt[2] = OWN_TX_ID; pkt[3] = CHAIN_TYPE_ADS; pkt[4] = (uint8_t)s_batch_n;
-    memcpy(pkt + HDR, s_batch, pay);
+    size_t len = HDR + pay + CRC_LEN;
+    pkt[0] = SYNC0; pkt[1] = SYNC1; pkt[2] = OWN_TX_ID; pkt[3] = type; pkt[4] = count;
+    memcpy(pkt + HDR, data, pay);
     put_u32(pkt + HDR + pay, esp_rom_crc32_le(0, pkt + 2, (uint32_t)(HDR - 2U + pay)));
     send_to(0, pkt, len);
     send_to(1, pkt, len);
     s_st.tx_packets++;
+}
+
+static void send_own(void)
+{
+    send_pkt(CHAIN_TYPE_ADS, (uint8_t)s_batch_n, s_batch, s_batch_n * sizeof(record_t));
     s_batch_n = 0;
+}
+
+/* The heartbeat: the other boards see this board also when its sensor sends no samples. */
+static void hello_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint8_t f = (uint8_t)((rec_get() ? CHAIN_HELLO_REC : 0U) | (io_auto_mode() ? CHAIN_HELLO_AUTO : 0U) |
+                              (ads1115_running() ? CHAIN_HELLO_SENSOR : 0U) | (sd_log_mounted() ? CHAIN_HELLO_SD : 0U));
+        send_pkt(CHAIN_TYPE_HELLO, 1, &f, 1);
+        vTaskDelay(pdMS_TO_TICKS(HELLO_MS));
+    }
 }
 
 void chain_push_ads(const record_t *r)
@@ -101,6 +140,8 @@ static void handle(int port, const uint8_t *pkt, size_t len)
     uint8_t dev = pkt[2] & 7U, type = pkt[3], cnt = pkt[4];
     s_st.rx_ok[port]++;
     if (dev == io_addr()) { s_st.own_dropped++; return; }
+    s_seen[dev] = xTaskGetTickCount() | 1U;       /* | 1: never 0 */
+    if (type == CHAIN_TYPE_HELLO) { s_flags[dev] = pkt[HDR]; }
     send_to(1 - port, pkt, len);                  /* repeat on the other port */
     s_st.forwarded++;
     if (type == CHAIN_TYPE_ADS && rec_get()) {   /* recording = saving */ sd_log_push_remote(dev, pkt + HDR, (size_t)cnt * rec_size(type)); }
@@ -145,6 +186,7 @@ void chain_start(void)
     const uart_config_t uc = { .baud_rate = CHAIN_BAUD, .data_bits = UART_DATA_8_BITS, .parity = UART_PARITY_DISABLE,
                                .stop_bits = UART_STOP_BITS_1, .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
                                .source_clk = UART_SCLK_DEFAULT };
+    s_tx_lock = xSemaphoreCreateMutexStatic(&s_tx_lock_struct);
     for (int p = 0; p < 2; p++) {
         s_mb[p] = xMessageBufferCreateStatic(MB_SIZE, s_mb_store[p], &s_mb_struct[p]);
         uart_driver_install(s_uart[p], 2048, 0, 0, NULL, 0);
@@ -153,6 +195,7 @@ void chain_start(void)
         xTaskCreatePinnedToCore(tx_task, "ch_tx", 3072, (void *)(intptr_t)p, 3, NULL, 0);
         xTaskCreatePinnedToCore(rx_task, "ch_rx", 3072, (void *)(intptr_t)p, 4, NULL, 0);
     }
+    xTaskCreatePinnedToCore(hello_task, "ch_hello", 2560, NULL, 2, NULL, 0);
 #ifdef DAQ_CHAIN_SELFTEST
     uart_set_loop_back(UART_NUM_1, true);
 #endif
