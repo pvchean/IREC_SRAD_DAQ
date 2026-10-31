@@ -4,3 +4,8 @@ managed_components/
 sdkconfig.*
 !sdkconfig.defaults
 .vscode/
+# Vendor data sheets: the vendors have the copyright. The whole folder stays out of Git (also its README and the text copies).
+Docs/Hardware Docs/
+# Python caches
+__pycache__/
+*.pyc
