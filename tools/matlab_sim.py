@@ -5,8 +5,9 @@
 
 Steps (the same order and bytes as the MATLAB app):
   1. "MATLAB PING" without a line end, wait 1.5 s, find the banner (Auto-Connect)
-  2. live numbers come; "DAQS\\n" during the stream; parse the reply with the app's regex
-  3. "STREAM OFF" -> "STREAM:OFF", then no more number lines
+  2. live numbers come, and "L:<count>" lines of the load cell (text for the app: the numbers do not count them);
+     "DAQS\\n" during the stream; parse the reply with the app's regex
+  3. "STREAM OFF" -> "STREAM:OFF", then no more number lines and no more L: lines
   4. "FILES" -> list; CHUNK download of the newest PFS file and of each SD file, CRC-32 per chunk
   5. "STREAM ON" -> numbers come again
 """
@@ -19,6 +20,25 @@ import serial
 
 BANNER = b"01010101 10101010 DAQBOARD V1 01010101 10101010"
 TXT_RE = re.compile(r"^[^0-9+\-.\r\n][^\r\n]*", re.M)     # the app's text line regex
+LC_RE = re.compile(r"L:-?\d+")                            # a load cell line
+
+
+def read_for(s, seconds):
+    """Read everything that comes in `seconds`. One read of in_waiting gets 4095 bytes at most (the tty buffer): that is
+    only half a second of the stream with the L: lines."""
+    out, end = b"", time.time() + seconds
+    while time.time() < end:
+        out += s.read(max(1, s.in_waiting))
+    return out.decode(errors="replace")
+
+
+def split_live(chunk):
+    """Number lines and load cell lines of a piece of the live stream. L: lines are text lines: no number line."""
+    lines = chunk.splitlines()
+    if lines and not chunk.endswith("\n"):
+        lines = lines[:-1]                                    # the last line can be cut
+    nums = [l for l in lines if l and not TXT_RE.match(l)]
+    return nums, [l for l in lines if l.startswith("L:")]
 
 
 def step(ok, text):
@@ -49,7 +69,14 @@ def get_chunks(s, src, name, start, chunk=16384, tries=5):
     while True:
         for t in range(tries):
             s.write(f"CHUNK {src} {name} {off} {chunk}\n".encode())
-            hdr = line(s, ("CHUNK:",), 5.0)
+            try:
+                hdr = line(s, ("CHUNK:",), 5.0)
+            except TimeoutError:      # a header can be lost: ask again, as the MATLAB app does
+                retries += 1
+                print(f"    retry at offset {off}: no reply")
+                time.sleep(0.3)
+                s.reset_input_buffer()
+                continue
             m = re.match(r"CHUNK:(\d+) (\d+) ([0-9A-Fa-f]{8})", hdr)
             err = hdr if hdr.startswith("CHUNK:ERR") else None
             if not err and (not m or int(m.group(1)) != off):
@@ -80,23 +107,25 @@ def main():
     out = sys.argv[2] if len(sys.argv) > 2 else None
     s = serial.Serial(port, 115200, timeout=3)
     time.sleep(0.3)
+    s.write(b"\n")                    # the first command after the open is garbled: this ends the broken line
+    time.sleep(0.2)
     s.reset_input_buffer()
 
     s.write(b"MATLAB PING")                                   # no line end, as write(s, "MATLAB PING", "string")
-    time.sleep(1.5)
-    resp = s.read(s.in_waiting)
-    step(BANNER in resp, "1 banner after MATLAB PING without a line end")
+    resp = read_for(s, 1.5)
+    step(BANNER.decode() in resp, "1 banner after MATLAB PING without a line end")
 
     s.reset_input_buffer()
-    time.sleep(1.0)
-    chunk = s.read(s.in_waiting).decode(errors="replace")
-    nums = [l for l in chunk.splitlines() if l and not TXT_RE.match(l)]
+    chunk = read_for(s, 1.0)
+    nums, lcs = split_live(chunk.split("\n", 1)[-1])         # the first line can be cut
     step(len(nums) > 500, f"2a live stream: {len(nums)} number lines in about 1 s (expect about 860)")
+    bad = [l for l in lcs if not LC_RE.fullmatch(l)]
+    step(len(lcs) > 150 and not bad, f"2c live stream: {len(lcs)} load cell L: lines in about 1 s (expect about 320), "
+                                     f"{len(bad)} not of the form L:<integer>")
 
     s.write(b"DAQS\n")
-    time.sleep(0.3)
-    chunk = s.read(s.in_waiting).decode(errors="replace")
-    txt = [t.strip() for t in TXT_RE.findall(chunk)]
+    chunk = read_for(s, 0.3)
+    txt = [t.strip() for t in TXT_RE.findall(chunk) if not t.startswith("L:")]     # the L: lines are not the reply
     m = [re.search(r"DAQS:SELF=(\d+) SEEN=([\d,]*)", t) for t in txt]
     m = [x for x in m if x]
     step(bool(m), f"2b DAQS reply found between the numbers: {txt}")
@@ -106,8 +135,8 @@ def main():
     step(wait_line(s, ("STREAM:OFF",)) is not None, "3a STREAM:OFF reply")
     time.sleep(0.5)
     rest = s.read(s.in_waiting).decode(errors="replace")
-    late = [l for l in rest.splitlines() if l and not TXT_RE.match(l)]
-    step(not late, f"3b no number lines after STREAM:OFF ({len(late)} found)")
+    late, late_lc = split_live(rest)
+    step(not late and not late_lc, f"3b no number lines and no L: lines after STREAM:OFF ({len(late)} and {len(late_lc)} found)")
 
     s.reset_input_buffer()
     s.write(b"FILES\n")
@@ -134,10 +163,9 @@ def main():
 
     s.reset_input_buffer()
     s.write(b"STREAM ON\n")
-    time.sleep(1.0)
-    chunk = s.read(s.in_waiting).decode(errors="replace")
-    nums = [l for l in chunk.splitlines() if l and not TXT_RE.match(l)]
-    step(len(nums) > 500, f"5 stream on again: {len(nums)} number lines in about 1 s")
+    chunk = read_for(s, 1.0)
+    nums, lcs = split_live(chunk.split("\n", 1)[-1])
+    step(len(nums) > 500, f"5 stream on again: {len(nums)} number lines and {len(lcs)} L: lines in about 1 s")
     s.write(b"STREAM OFF\n")
     print("ALL PASS")
 

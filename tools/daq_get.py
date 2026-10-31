@@ -66,7 +66,14 @@ def get_chunks(s, src, name, start, chunk=16384, tries=5):
     while True:
         for t in range(tries):
             s.write(f"CHUNK {src} {name} {off} {chunk}\n".encode())
-            hdr = line(s, ("CHUNK:",), 5.0)
+            try:
+                hdr = line(s, ("CHUNK:",), 5.0)
+            except TimeoutError:      # a header can be lost: ask again, as the MATLAB app does
+                retries += 1
+                print(f"    retry at offset {off}: no reply")
+                time.sleep(0.3)
+                s.reset_input_buffer()
+                continue
             m = re.match(r"CHUNK:(\d+) (\d+) ([0-9A-Fa-f]{8})", hdr)
             err = hdr if hdr.startswith("CHUNK:ERR") else None
             if not err and (not m or int(m.group(1)) != off):
@@ -97,6 +104,8 @@ def main():
     if len(a) < 2:
         sys.exit(__doc__)
     s = serial.Serial(a[0], 115200, timeout=3)
+    time.sleep(0.3)
+    s.write(b"\n")            # the first command after the open is garbled: this ends the broken line
     time.sleep(0.2)
     s.reset_input_buffer()
     self_id, seen = daqs(s)
