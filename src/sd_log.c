@@ -18,7 +18,7 @@
 #include "io.h"
 
 #define CHUNK       4096U                 /* multiple of 512: good for SDMMC DMA */
-#define SB_SIZE     16384U                /* about 2.3 s of data at 860 SPS; internal RAM */
+#define SB_SIZE     24576U                /* about 2.5 s of data at 883 + 320 SPS; internal RAM */
 #define REM_SIZE    8192U                 /* records of the other boards, waiting for the SD task */
 #define NDEV        8
 #define PARTIAL_MS  500                   /* write a partial chunk after this idle time (save often) */
@@ -48,7 +48,10 @@ uint64_t sd_log_bytes(void)   { return s_bytes; }
 
 void sd_log_push(const record_t *r)
 {
-    if (s_sb && xStreamBufferSend(s_sb, r, sizeof *r, 0) != sizeof *r) { s_dropped++; }
+    if (!s_sb) { return; }
+    /* A stream buffer takes the part that fits. A part of a record would move the 8-byte grid of the file. */
+    if (xStreamBufferSpacesAvailable(s_sb) >= sizeof *r) { (void)xStreamBufferSend(s_sb, r, sizeof *r, 0); }
+    else { s_dropped++; }
 }
 
 void sd_log_push_remote(uint8_t dev, const uint8_t *records, size_t len)

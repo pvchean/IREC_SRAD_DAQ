@@ -34,7 +34,8 @@ void stream_enable(bool on)
 
 void stream_push(const record_t *r)
 {
-    if (s_on) { (void)xStreamBufferSend(s_sb, r, sizeof *r, 0); }   /* a full buffer drops the sample */
+    /* A full buffer drops the sample. A part of a record would move the grid of the reader. */
+    if (s_on && xStreamBufferSpacesAvailable(s_sb) >= sizeof *r) { (void)xStreamBufferSend(s_sb, r, sizeof *r, 0); }
 }
 
 static void stream_task(void *arg)
@@ -48,7 +49,8 @@ static void stream_task(void *arg)
         s_busy = true;                              /* set before the s_on test: see stream_enable() */
         if (!s_on) { s_busy = false; continue; }
         for (size_t i = 0; i < n; i++) {
-            len += (size_t)snprintf(line + len, sizeof line - len, "%.3f\n", (double)r[i].reading * VOLT_PER_LSB);
+            if (rec_is_lc(&r[i])) { len += (size_t)snprintf(line + len, sizeof line - len, "L:%ld\n", (long)rec_lc_count(&r[i])); }
+            else { len += (size_t)snprintf(line + len, sizeof line - len, "%.3f\n", (double)r[i].reading * VOLT_PER_LSB); }
         }
         /* A short timeout: with no host reading, the sample task never waits for this write. */
         if (len) { usb_serial_jtag_write_bytes(line, len, pdMS_TO_TICKS(20)); }

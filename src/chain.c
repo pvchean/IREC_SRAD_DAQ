@@ -13,6 +13,7 @@
 #include "ads1115.h"
 #include "board.h"
 #include "io.h"
+#include "nau7802.h"
 #include "sd_log.h"
 
 #define SYNC0        0xA5
@@ -20,7 +21,7 @@
 #define HDR          5U                   /* sync 2, device, type, count */
 #define CRC_LEN      4U
 #define MAX_RECS     32U
-#define MAX_PKT      (HDR + MAX_RECS * 9U + CRC_LEN)
+#define MAX_PKT      (HDR + MAX_RECS * sizeof(record_t) + CRC_LEN)
 #define OWN_RECS     16U
 #define MB_SIZE      4096U
 #define HELLO_MS     1000U                /* heartbeat interval */
@@ -50,8 +51,9 @@ static volatile uint8_t s_flags[8];             /* last heartbeat flags of each 
 typedef struct { uint8_t buf[MAX_PKT + 4]; size_t n; } rx_t;
 static rx_t s_rx[2];
 
-static uint8_t s_batch[OWN_RECS * sizeof(record_t)];
-static unsigned s_batch_n;
+/* The own records wait here, one batch for each sensor. Only the sink in main.c calls these, under its lock. */
+typedef struct { uint8_t type; unsigned n; uint8_t buf[OWN_RECS * sizeof(record_t)]; } batch_t;
+static batch_t s_ads = { .type = CHAIN_TYPE_ADS }, s_lc = { .type = CHAIN_TYPE_LOADCELL };
 
 void chain_get_stats(chain_stats_t *out) { *out = s_st; }
 
@@ -69,7 +71,8 @@ uint8_t chain_seen(uint32_t max_age_ms, uint8_t flags[8])
 
 static size_t rec_size(uint8_t type)
 {
-    return type == CHAIN_TYPE_ADS ? 8U : type == CHAIN_TYPE_LOADCELL ? 9U : type == CHAIN_TYPE_HELLO ? 1U : 0U;
+    return (type == CHAIN_TYPE_ADS || type == CHAIN_TYPE_LOADCELL || type == CHAIN_TYPE_CAL) ? sizeof(record_t)
+         : type == CHAIN_TYPE_HELLO ? 1U : 0U;
 }
 
 static void send_to(int port, const uint8_t *pkt, size_t len)
@@ -105,28 +108,37 @@ static void send_pkt(uint8_t type, uint8_t count, const uint8_t *data, size_t pa
     s_st.tx_packets++;
 }
 
-static void send_own(void)
-{
-    send_pkt(CHAIN_TYPE_ADS, (uint8_t)s_batch_n, s_batch, s_batch_n * sizeof(record_t));
-    s_batch_n = 0;
-}
-
 /* The heartbeat: the other boards see this board also when its sensor sends no samples. */
 static void hello_task(void *arg)
 {
     (void)arg;
     for (;;) {
         uint8_t f = (uint8_t)((rec_get() ? CHAIN_HELLO_REC : 0U) | (io_auto_mode() ? CHAIN_HELLO_AUTO : 0U) |
-                              (ads1115_running() ? CHAIN_HELLO_SENSOR : 0U) | (sd_log_mounted() ? CHAIN_HELLO_SD : 0U));
+                              (ads1115_running() ? CHAIN_HELLO_SENSOR : 0U) | (sd_log_mounted() ? CHAIN_HELLO_SD : 0U) |
+                              (nau7802_running() ? CHAIN_HELLO_LOADCELL : 0U));
         send_pkt(CHAIN_TYPE_HELLO, 1, &f, 1);
         vTaskDelay(pdMS_TO_TICKS(HELLO_MS));
     }
 }
 
-void chain_push_ads(const record_t *r)
+static void batch_push(batch_t *b, const record_t *r)
 {
-    memcpy(s_batch + s_batch_n * sizeof *r, r, sizeof *r);
-    if (++s_batch_n == OWN_RECS) { send_own(); }
+    memcpy(b->buf + b->n * sizeof *r, r, sizeof *r);
+    if (++b->n == OWN_RECS) {
+        send_pkt(b->type, OWN_RECS, b->buf, sizeof b->buf);
+        b->n = 0;
+    }
+}
+
+void chain_push_ads(const record_t *r) { batch_push(&s_ads, r); }
+void chain_push_lc(const record_t *r)  { batch_push(&s_lc, r); }
+
+void chain_push_cal(const record_t *r, unsigned n)
+{
+    if (n > 0U && n <= OWN_RECS) {
+        send_pkt(CHAIN_TYPE_CAL, (uint8_t)n, (const uint8_t *)r, n * sizeof *r);
+        s_st.tx_cal++;
+    }
 }
 
 static void shift(rx_t *s, size_t k)
@@ -141,10 +153,13 @@ static void handle(int port, const uint8_t *pkt, size_t len)
     s_st.rx_ok[port]++;
     if (dev == io_addr()) { s_st.own_dropped++; return; }
     s_seen[dev] = xTaskGetTickCount() | 1U;       /* | 1: never 0 */
+    if (type == CHAIN_TYPE_CAL) { s_st.rx_cal++; }
     if (type == CHAIN_TYPE_HELLO) { s_flags[dev] = pkt[HDR]; }
     send_to(1 - port, pkt, len);                  /* repeat on the other port */
     s_st.forwarded++;
-    if (type == CHAIN_TYPE_ADS && rec_get()) {   /* recording = saving */ sd_log_push_remote(dev, pkt + HDR, (size_t)cnt * rec_size(type)); }
+    if ((type == CHAIN_TYPE_ADS || type == CHAIN_TYPE_LOADCELL || type == CHAIN_TYPE_CAL) && rec_get()) {   /* recording = saving */
+        sd_log_push_remote(dev, pkt + HDR, (size_t)cnt * rec_size(type));
+    }
 }
 
 /* One received byte. The state is the buffer: wrong bytes at the start are removed until a whole valid

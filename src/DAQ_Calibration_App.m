@@ -19,18 +19,34 @@ function DAQ_Calibration_App()
 
     isLiveLogging = true; % Flag controlling whether to append to live CSV
 
+    % --- Sensor of the live view: 1 = PT, 2 = load cell ---
+    % The live plots, the formula, and the calibration points belong to one sensor. The values of the other sensor
+    % wait in sensorSaved. The DAQ saves both sensors at all times.
+    sensorIdx = 1;
+    sensorSaved = struct('calV', {[], []}, 'calP', {[], []}, 'A', {1, 1}, 'B', {0, 0});
+    liveDecimation = [64, 16];       % about 14 points/s for the PT, about 20 points/s for the load cell
+    lcMvVPerCount = 1000 / 2^31;     % load cell output: counts / (gain 128 * 2^24), as mV/V
+    xUnit = {'V', 'mV/V'};
+    yUnit = {'PSI', 'N'};
+
     % --- DAQ chain and file transfer state ---
     chainTimer = [];   % Timer that asks the DAQ for the boards in the UART chain (DAQS)
     selfId = -1;       % Device ID of the DAQ on USB (-1 = unknown)
     seenIds = [];      % Device IDs of the other DAQs in the chain
     portName = '';     % Serial port of the connected DAQ
     xferBusy = false;  % True while a FILES/CHUNK transfer owns the serial port
+    calReplyMode = ''; % 'save' or 'read': what the next CAL:OK reply of the DAQ is for ('' = no button waits)
 
     % Files & Plot window handles and data
-    filesFig = []; boardList = []; localList = []; dirField = []; filesInfoLbl = [];
+    filesFig = []; boardList = []; localList = []; dirField = []; filesInfoLbl = []; sensorDropF = [];
     axF = []; warnLbl = []; startSlider = []; endSlider = []; startLbl = []; endLbl = []; statsLbl = []; unitDrop = [];
+    calLbl = [];
     boardFiles = struct('src', {}, 'name', {}, 'bytes', {}, 'start', {});
     plotT = []; plotRaw = []; plotSeq = []; plotName = ''; plotBytes = 0;
+    plotSets = struct('t', {[], []}, 'raw', {[], []}, 'seq', {[], []}); % one entry for each sensor of the loaded file
+    plotSensor = 1;
+    plotCal = noCal(); % the calibration block that loadRecords found in the loaded file
+    unitItems = {{'Voltage (V)', 'Pressure (PSI, Ax+B)', 'Raw counts'}, {'Output (mV/V)', 'Force (N, Ax+B)', 'Raw counts'}};
 
     % Handles for performant live plotting and windows
     lineV = [];
@@ -62,6 +78,9 @@ function DAQ_Calibration_App()
     calFile = fullfile(outDir, sprintf('manual_calibration_points_%s.csv', timestampStr));
     calDataFile = fopen(calFile, 'a');
     fprintf(calDataFile, 'Voltage,Pressure\n');
+    otherLiveFile = -1;   % the CSV files of the sensor that the live view does not show
+    otherCalFile = -1;
+    lcFilesOpen = false;  % the load cell CSV files open when the load cell is selected
 
     % --- Main UI Layout ---
     fig = uifigure('Name', 'DAQ Calibration Tool', 'Position', [100, 100, 1100, 710]);
@@ -78,29 +97,38 @@ function DAQ_Calibration_App()
     uilabel(fig, 'Position', [510, 640, 130, 22], 'Text', 'Live Samples Shown:');
     windowSlider = uislider(fig, 'Position', [650, 650, 180, 3], 'Limits', [10, 500], 'Value', windowSize, 'ValueChangedFcn', @updateWindowSize);
 
+    uilabel(fig, 'Position', [860, 640, 50, 22], 'Text', 'Sensor:');
+    uidropdown(fig, 'Position', [915, 640, 165, 22], 'Items', {'PT', 'Load Cell'}, 'ValueChangedFcn', @sensorChanged);
+
     % --- Section 1: Old Calibration Buttons ---
     pnlCal = uipanel(fig, 'Title', 'PT Calibration (Point-by-Point)', 'FontWeight', 'bold', 'Position', [20, 560, 1060, 65]);
 
-    uilabel(pnlCal, 'Position', [15, 12, 210, 22], 'Text', 'Regulator Pressure Setpoint (PSI):');
+    lblSetpoint = uilabel(pnlCal, 'Position', [15, 12, 210, 22], 'Text', 'Regulator Pressure Setpoint (PSI):');
     numInput = uieditfield(pnlCal, 'numeric', 'Position', [230, 12, 70, 22], 'Value', 0);
     btnCapture = uibutton(pnlCal, 'Position', [315, 12, 160, 22], 'Text', 'Capture Average & Save', 'ButtonPushedFcn', @captureCal);
     btnViewCal = uibutton(pnlCal, 'Position', [490, 12, 150, 22], 'Text', 'Calculate fit & View', 'ButtonPushedFcn', @openCalWindow);
 
     % --- Section 2: Manual Ax+B Formula & Zero Pressure ---
-    pnlParams = uipanel(fig, 'Title', 'Manual Formula (Ax + B) & Zeroing', 'FontWeight', 'bold', 'Position', [20, 485, 1060, 65]);
+    pnlParams = uipanel(fig, 'Title', 'Manual Formula (Ax + B) & Zeroing', 'FontWeight', 'bold', 'Position', [20, 462, 1060, 88]);
 
-    uilabel(pnlParams, 'Position', [15, 12, 110, 22], 'Text', 'Pressure (PSI) =');
+    lblFormula = uilabel(pnlParams, 'Position', [15, 12, 110, 22], 'Text', 'Pressure (PSI) =');
     inputA = uieditfield(pnlParams, 'numeric', 'Position', [125, 12, 85, 22], ...
         'Value', currentA, 'ValueDisplayFormat', '%.5f', 'ValueChangedFcn', @updateNumericAB);
 
-    uilabel(pnlParams, 'Position', [218, 12, 40, 22], 'Text', '* V +');
+    lblTimes = uilabel(pnlParams, 'Position', [218, 12, 40, 22], 'Text', '* V +');
     inputB = uieditfield(pnlParams, 'numeric', 'Position', [260, 12, 85, 22], ...
         'Value', currentB, 'ValueDisplayFormat', '%.5f', 'ValueChangedFcn', @updateNumericAB);
 
     btnZeroAtm = uibutton(pnlParams, 'Position', [365, 12, 190, 22], ...
         'Text', 'Zero Out Pressure (Tare)', 'ButtonPushedFcn', @zeroPressure);
 
-    tareStatusLbl = uilabel(pnlParams, 'Position', [570, 12, 450, 22], 'Text', '');
+    tareStatusLbl = uilabel(pnlParams, 'Position', [570, 12, 480, 22], 'Text', '');
+
+    % Second row of the panel: A and B of the selected sensor go to the flash of the DAQ and come back from it
+    btnSaveCal = uibutton(pnlParams, 'Position', [815, 38, 110, 22], ...
+        'Text', 'Save to DAQ', 'ButtonPushedFcn', @saveCalToDaq);
+    btnReadCal = uibutton(pnlParams, 'Position', [935, 38, 115, 22], ...
+        'Text', 'Read from DAQ', 'ButtonPushedFcn', @readCalFromDaq);
 
     % --- Plots ---
     % Plot 1: Live Voltage
@@ -121,6 +149,75 @@ function DAQ_Calibration_App()
     grid(ax2, 'on');
     hold(ax2, 'on');
     lineP = plot(ax2, NaN, NaN, 'r--', 'LineWidth', 1.5);
+
+    % --- Selection of the live sensor ---
+    function sensorChanged(src, ~)
+        k = find(strcmp(src.Items, src.Value), 1);
+        if k == sensorIdx
+            return;
+        end
+        sensorSaved(sensorIdx).calV = calV;
+        sensorSaved(sensorIdx).calP = calP;
+        sensorSaved(sensorIdx).A = currentA;
+        sensorSaved(sensorIdx).B = currentB;
+        sensorIdx = k;
+        calV = sensorSaved(k).calV;
+        calP = sensorSaved(k).calP;
+        currentA = sensorSaved(k).A;
+        currentB = sensorSaved(k).B;
+        inputA.Value = currentA;
+        inputB.Value = currentB;
+        tareStatusLbl.Text = '';
+
+        tmp = liveDataFile; liveDataFile = otherLiveFile; otherLiveFile = tmp;
+        tmp = calDataFile; calDataFile = otherCalFile; otherCalFile = tmp;
+        if k == 2 && ~lcFilesOpen
+            lcFilesOpen = true;
+            if isLiveLogging
+                liveDataFile = fopen(fullfile(outDir, sprintf('live_data_loadcell_%s.csv', timestampStr)), 'a');
+                fprintf(liveDataFile, 'Time,mV/V\n');
+            end
+            calDataFile = fopen(fullfile(outDir, sprintf('manual_calibration_points_loadcell_%s.csv', timestampStr)), 'a');
+            fprintf(calDataFile, 'mV/V,Force\n');
+        end
+
+        % The plots start again with the samples of the new sensor
+        decimationFactor = liveDecimation(k);
+        sampleCount = 0;
+        liveV = [];
+        liveT = [];
+        lineV.XData = NaN; lineV.YData = NaN;
+        lineP.XData = NaN; lineP.YData = NaN;
+        if ~isempty(calFig) && isvalid(calFig)
+            delete(calFig);
+        end
+        calFig = [];
+        calTransientLine = [];
+
+        if k == 1
+            pnlCal.Title = 'PT Calibration (Point-by-Point)';
+            lblSetpoint.Text = 'Regulator Pressure Setpoint (PSI):';
+            lblFormula.Text = 'Pressure (PSI) =';
+            lblTimes.Text = '* V +';
+            btnZeroAtm.Text = 'Zero Out Pressure (Tare)';
+            title(ax1, 'Live Voltage (Transducer)');
+            ylabel(ax1, 'Voltage (V)');
+            ylim(ax1, [0, 5.5]);
+            title(ax2, 'Live Estimated Pressure (PSI)');
+            ylabel(ax2, 'Pressure (PSI)');
+        else
+            pnlCal.Title = 'Load Cell Calibration (Point-by-Point)';
+            lblSetpoint.Text = 'Applied Force (N):';
+            lblFormula.Text = 'Force (N) =';
+            lblTimes.Text = '* mV/V +';
+            btnZeroAtm.Text = 'Zero Out Force (Tare)';
+            title(ax1, 'Live Output (Load Cell)');
+            ylabel(ax1, 'Output (mV/V)');
+            ylim(ax1, 'auto');
+            title(ax2, 'Live Estimated Force (N)');
+            ylabel(ax2, 'Force (N)');
+        end
+    end
 
     % --- Fast Helper Functions (Separated from Hot Loop) ---
     function updatePlotsOnly()
@@ -158,13 +255,13 @@ function DAQ_Calibration_App()
 
                 lines = { ...
                     '--- CALIBRATION FORMULA ---', ...
-                    sprintf('P = %.5f * Volts %+.5f\n', currentA, currentB), ...
+                    sprintf('%s = %.5f * %s %+.5f\n', yUnit{sensorIdx}, currentA, xUnit{sensorIdx}, currentB), ...
                     '--- Non-Linearity Errors ---' ...
                 };
                 for idx = 1:length(calV)
-                    lines{end+1} = sprintf('Pt %d (%.2f PSI Target):', idx, calP(idx));
-                    lines{end+1} = sprintf('  Error:    %+.4f PSI', errs(idx));
-                    lines{end+1} = sprintf('  Sq Error:  %.4e PSI^2', sq_errs(idx));
+                    lines{end+1} = sprintf('Pt %d (%.2f %s Target):', idx, calP(idx), yUnit{sensorIdx});
+                    lines{end+1} = sprintf('  Error:    %+.4f %s', errs(idx), yUnit{sensorIdx});
+                    lines{end+1} = sprintf('  Sq Error:  %.4e %s^2', sq_errs(idx), yUnit{sensorIdx});
                 end
                 calTxt.Value = lines;
             end
@@ -181,20 +278,20 @@ function DAQ_Calibration_App()
 
     function zeroPressure(~, ~)
         if isempty(liveV)
-            uialert(fig, 'No live voltage data available to zero the offset.', 'Error');
+            uialert(fig, 'No live sensor data available to zero the offset.', 'Error');
             return;
         end
 
-        % Calculate steady-state average voltage from last 10 decimated points
+        % Calculate steady-state average output from last 10 decimated points
         ptsToAvg = min(10, length(liveV));
         avgV = mean(liveV(end-ptsToAvg+1:end));
 
-        % Solve for B such that P = A * avgV + B = 0 PSI
+        % Solve for B such that A * avgV + B = 0
         currentB = -currentA * avgV;
         inputB.Value = currentB;
 
         % Update non-blocking status label instead of stalling serial queue with uialert
-        tareStatusLbl.Text = sprintf('Zeroed at %.4f V (New B = %+.5f PSI)', avgV, currentB);
+        tareStatusLbl.Text = sprintf('Zeroed at %.5f %s (New B = %+.5f %s)', avgV, xUnit{sensorIdx}, currentB, yUnit{sensorIdx});
 
         updatePlotsOnly();
         updateCalWindowDetails();
@@ -288,6 +385,15 @@ function DAQ_Calibration_App()
             completeLines = fullStr(1:lastLF);
             serialCarryover = fullStr(lastLF+1:end);
 
+            % Load cell lines "L:<raw count>" come between the PT number lines
+            lcCounts = [];
+            % (a text line such as "CAL:OK ..." also contains "L:": look for the line start)
+            if ~isempty(regexp(completeLines, '^L:', 'once', 'lineanchors'))
+                lcTok = regexp(completeLines, '^L:(-?\d+)', 'tokens', 'lineanchors');
+                lcCounts = sscanf(strjoin([lcTok{:}], ' '), '%f');
+                completeLines = regexprep(completeLines, '^L:-?\d+', '', 'lineanchors');
+            end
+
             % Text lines (replies such as DAQS:..., log lines) come between the number lines.
             % A text line starts with a character that cannot start a number.
             txtRe = '^[^0-9+\-.\r\n][^\r\n]*';
@@ -301,12 +407,17 @@ function DAQ_Calibration_App()
 
             % Vectorized C-speed float parsing of all samples in this chunk
             vals = sscanf(completeLines, '%f');
+            if sensorIdx == 2
+                vals = lcCounts * lcMvVPerCount; % the plots show the selected sensor only
+            end
             if isempty(vals)
                 return;
             end
 
             % Clamp voltage strictly between 0 and 5.5V
-            vals = max(0, min(5.5, vals));
+            if sensorIdx == 1
+                vals = max(0, min(5.5, vals));
+            end
 
             % Find exact indices that hit the decimation factor (64)
             numNew = length(vals);
@@ -325,7 +436,7 @@ function DAQ_Calibration_App()
                 if isLiveLogging && liveDataFile ~= -1
                     t_stamp = char(datetime('now', 'Format', 'yyyy-MM-dd HH:mm:ss.SSS'));
                     for k = 1:length(decV)
-                        fprintf(liveDataFile, '%s,%f\n', t_stamp, decV(k));
+                        fprintf(liveDataFile, '%s,%.7f\n', t_stamp, decV(k));
                     end
                 end
 
@@ -378,7 +489,7 @@ function DAQ_Calibration_App()
         calP(end+1) = pSet;
 
         if calDataFile ~= -1
-            fprintf(calDataFile, '%f,%f\n', avgV, pSet);
+            fprintf(calDataFile, '%.7f,%f\n', avgV, pSet);
         end
 
         if length(calV) >= 2
@@ -391,12 +502,16 @@ function DAQ_Calibration_App()
             updateCalWindowDetails();
         end
 
-        uialert(fig, sprintf('Captured %.3f V at %.2f PSI.', avgV, pSet), 'Saved', 'Icon', 'success');
+        uialert(fig, sprintf('Captured %.5f %s at %.2f %s.', avgV, xUnit{sensorIdx}, pSet, yUnit{sensorIdx}), 'Saved', 'Icon', 'success');
     end
 
     function openCalWindow(~, ~)
         if length(calV) < 2
             uialert(fig, 'Need at least 2 manual points to least-squares fit a line.', 'Not Enough Data');
+            return;
+        end
+        if isempty(liveV)
+            uialert(fig, 'No live data available yet.', 'Error');
             return;
         end
 
@@ -429,8 +544,14 @@ function DAQ_Calibration_App()
         axCal = uiaxes(calFig, 'Position', [340, 20, 540, 460]);
         hold(axCal, 'on');
 
-        v_min = max(0, min([calV, liveV]) - 0.5);
-        v_max = min(5.5, max([calV, liveV]) + 0.5);
+        if sensorIdx == 1
+            v_min = max(0, min([calV, liveV]) - 0.5);
+            v_max = min(5.5, max([calV, liveV]) + 0.5);
+        else
+            v_span = max(max([calV, liveV]) - min([calV, liveV]), 1e-6);
+            v_min = min([calV, liveV]) - 0.1 * v_span;
+            v_max = max([calV, liveV]) + 0.1 * v_span;
+        end
 
         v_range = linspace(v_min, v_max, 100);
         p_line = currentA .* v_range + currentB;
@@ -444,8 +565,8 @@ function DAQ_Calibration_App()
             'MarkerSize', 6, 'DisplayName', 'Live Transient');
 
         title(axCal, 'Calibration Linearity Check');
-        xlabel(axCal, 'Transducer Voltage (Volts)');
-        ylabel(axCal, 'Estimated Pressure (PSI)');
+        xlabel(axCal, sprintf('Sensor Output (%s)', xUnit{sensorIdx}));
+        ylabel(axCal, sprintf('Estimated Value (%s)', yUnit{sensorIdx}));
         legend(axCal, 'Location', 'best');
         grid(axCal, 'on');
         hold(axCal, 'off');
@@ -479,6 +600,14 @@ function DAQ_Calibration_App()
             end
             updateChainLabel();
         end
+
+        % Reply of CAL PT / CAL LC / CAL GET: "CAL:OK rev=.. pt_set=.. pt_a=.. ..." or "CAL:ERR <reason>"
+        if startsWith(t, 'CAL:ERR')
+            calReplyMode = '';
+            tareStatusLbl.Text = ['DAQ error: ', strtrim(regexprep(t, '^CAL:ERR', ''))];
+        elseif startsWith(t, 'CAL:OK')
+            applyCalReply(t);
+        end
     end
 
     function updateChainLabel()
@@ -510,6 +639,129 @@ function DAQ_Calibration_App()
         if ~isempty(filesInfoLbl) && isvalid(filesInfoLbl)
             filesInfoLbl.Text = sprintf('Connected DAQ: DAQ%d   Chain: %s', selfId, char(strjoin(names, ' ')));
         end
+    end
+
+    % =====================================================================
+    % --- Calibration in the DAQ (CAL PT / CAL LC / CAL GET commands) ---
+    % "CAL PT <A> <B>" or "CAL LC <A> <B>" saves A and B of one sensor in the DAQ, "CAL GET" asks for both.
+    % Reply (one line): "CAL:OK rev=<n> pt_set=<0|1> pt_a=<f> pt_b=<f> lc_set=<0|1> lc_a=<f> lc_b=<f>" or "CAL:ERR <text>"
+    % =====================================================================
+    function ok = daqReadyForCal()
+        % The checks of both buttons: a connected DAQ, and no file transfer on the port
+        ok = false;
+        if isempty(s) || ~isvalid(s)
+            uialert(fig, 'Connect to a DAQ first (Auto-Connect).', 'Not Connected');
+            return;
+        end
+        if xferBusy
+            return;
+        end
+        ok = true;
+    end
+
+    function saveCalToDaq(~, ~)
+        if ~daqReadyForCal()
+            return;
+        end
+        if ~isfinite(currentA) || ~isfinite(currentB)
+            uialert(fig, 'A and B must be finite numbers.', 'Cannot Save');
+            return;
+        end
+        if sensorIdx == 1
+            tag = 'PT';
+        else
+            tag = 'LC';
+        end
+        calReplyMode = 'save';
+        tareStatusLbl.Text = 'Saving to DAQ...';
+        try
+            writeline(s, sprintf('CAL %s %.9g %.9g', tag, currentA, currentB));
+        catch
+            calReplyMode = '';
+            tareStatusLbl.Text = 'Could not send the command to the DAQ.';
+        end
+    end
+
+    function readCalFromDaq(~, ~)
+        if ~daqReadyForCal()
+            return;
+        end
+        calReplyMode = 'read';
+        tareStatusLbl.Text = 'Reading from DAQ...';
+        try
+            writeline(s, "CAL GET");
+        catch
+            calReplyMode = '';
+            tareStatusLbl.Text = 'Could not send the command to the DAQ.';
+        end
+    end
+
+    function applyCalReply(t)
+        tok = regexp(t, ['^CAL:OK\s+rev=(\d+)\s+pt_set=(\d)\s+pt_a=(\S+)\s+pt_b=(\S+)', ...
+            '\s+lc_set=(\d)\s+lc_a=(\S+)\s+lc_b=(\S+)'], 'tokens', 'once');
+        forBtn = calReplyMode;   % which button asked
+        calReplyMode = '';   % one reply for each button press
+        if isempty(tok)
+            tareStatusLbl.Text = ['DAQ reply not understood: ', t];
+            return;
+        end
+        v = str2double(tok);
+        c = noCal();
+        c.valid = true;
+        c.rev = v(1);
+        c.ptSet = v(2) ~= 0; c.ptA = v(3); c.ptB = v(4);
+        c.lcSet = v(5) ~= 0; c.lcA = v(6); c.lcB = v(7);
+        if strcmp(forBtn, 'save')
+            tareStatusLbl.Text = ['DAQ saved: ', calText(c, ' | ')];
+            return;   % the values of the app stay as they are
+        elseif strcmp(forBtn, 'read')
+            tareStatusLbl.Text = ['Read from DAQ: ', calText(c, ' | ')];
+        else
+            tareStatusLbl.Text = ['DAQ calibration: ', calText(c, ' | ')];
+            return;
+        end
+
+        % Read from DAQ: take the values of the sensors that have a saved calibration
+        isSet = [c.ptSet, c.lcSet];
+        newA = [c.ptA, c.lcA];
+        newB = [c.ptB, c.lcB];
+        for kk = 1:2
+            if ~isSet(kk) || ~isfinite(newA(kk)) || ~isfinite(newB(kk))
+                continue;
+            end
+            if kk == sensorIdx
+                currentA = newA(kk);
+                currentB = newB(kk);
+                inputA.Value = currentA;
+                inputB.Value = currentB;
+            else
+                sensorSaved(kk).A = newA(kk);
+                sensorSaved(kk).B = newB(kk);
+            end
+        end
+        updatePlotsOnly();
+        updateCalWindowDetails();
+    end
+
+    function c = noCal()
+        % A calibration block with nothing in it (the same fields as the result of loadRecords)
+        c = struct('valid', false, 'rev', 0, 'ptSet', false, 'ptA', NaN, 'ptB', NaN, ...
+            'lcSet', false, 'lcA', NaN, 'lcB', NaN, 'nBlocks', 0);
+    end
+
+    function str = calText(c, sep)
+        % "rev 3, PT A=.., B=.." for the sensors that have a calibration; sep separates the sensors
+        parts = {};
+        if c.ptSet
+            parts{end+1} = sprintf('PT A=%.6g, B=%.6g', c.ptA, c.ptB);
+        end
+        if c.lcSet
+            parts{end+1} = sprintf('LC A=%.6g, B=%.6g', c.lcA, c.lcB);
+        end
+        if isempty(parts)
+            parts = {'no sensor calibrated'};
+        end
+        str = sprintf('rev %d, %s', c.rev, strjoin(parts, sep));
     end
 
     % =====================================================================
@@ -724,7 +976,7 @@ function DAQ_Calibration_App()
         uibutton(pnlL, 'Position', [120, 10, 210, 26], 'Text', 'Plot Selected', 'ButtonPushedFcn', @plotSelected);
 
         % Plot with start / end range sliders
-        axF = uiaxes(filesFig, 'Position', [360, 185, 790, 525]);
+        axF = uiaxes(filesFig, 'Position', [360, 210, 790, 500]);
         grid(axF, 'on');
         title(axF, 'Select a downloaded file');
         xlabel(axF, 'Time (s)');
@@ -742,10 +994,13 @@ function DAQ_Calibration_App()
 
         uilabel(filesFig, 'Position', [360, 12, 45, 22], 'Text', 'Units:');
         unitDrop = uidropdown(filesFig, 'Position', [410, 12, 170, 22], ...
-            'Items', {'Voltage (V)', 'Pressure (PSI, Ax+B)', 'Raw counts'}, 'ValueChangedFcn', @(~, ~) updateRangePlot());
+            'Items', unitItems{1}, 'ValueChangedFcn', @(~, ~) updateRangePlot());
+        sensorDropF = uidropdown(filesFig, 'Position', [1030, 85, 120, 22], 'Items', {'PT', 'Load Cell'}, ...
+            'ValueChangedFcn', @selectPlotSensor);
         statsLbl = uilabel(filesFig, 'Position', [590, 12, 560, 22], 'Text', '');
         warnLbl = uilabel(filesFig, 'Position', [360, 155, 790, 22], 'Text', '', 'FontWeight', 'bold', ...
             'FontColor', [0.85, 0.33, 0.1]);
+        calLbl = uilabel(filesFig, 'Position', [360, 183, 790, 22], 'Text', '');
 
         updateChainLabel();
         refreshLocalFiles();
@@ -881,16 +1136,40 @@ function DAQ_Calibration_App()
         if isempty(name)
             return;
         end
-        [plotT, plotRaw, plotSeq, plotBytes] = loadRecords(fullfile(downloadDir, name));
+        [plotSets, plotBytes, plotCal] = loadRecords(fullfile(downloadDir, name));
         plotName = name;
-        if isempty(plotT)
+        showFileCal();
+        nPt = numel(plotSets(1).t);
+        nLc = numel(plotSets(2).t);
+        fprintf('Loaded %s: %d bytes, %d PT records, %d load cell records\n', name, plotBytes, nPt, nLc);
+        if nPt == 0 && nLc == 0
             cla(axF);
             title(axF, [name, ' (no records)'], 'Interpreter', 'none');
             statsLbl.Text = '';
+            plotT = [];
+            return;
+        end
+        if numel(plotSets(strcmp(sensorDropF.Items, sensorDropF.Value)).t) == 0
+            sensorDropF.Value = sensorDropF.Items{1 + (nPt == 0)}; % the sensor that has data
+        end
+        selectPlotSensor();
+    end
+
+    function selectPlotSensor(~, ~)
+        showFileCal();
+        plotSensor = find(strcmp(sensorDropF.Items, sensorDropF.Value), 1);
+        unitDrop.Items = unitItems{plotSensor};
+        plotT = plotSets(plotSensor).t;
+        plotRaw = plotSets(plotSensor).raw;
+        plotSeq = plotSets(plotSensor).seq;
+        if isempty(plotT)
+            cla(axF);
+            title(axF, [plotName, ' (no records of this sensor)'], 'Interpreter', 'none');
+            statsLbl.Text = '';
+            warnLbl.Text = '';
             return;
         end
         tEnd = max(plotT(end), 1e-3);
-        fprintf('Loaded %s: %d bytes, %d records, %.3f s\n', name, plotBytes, numel(plotT), tEnd);
         startSlider.Limits = [0, tEnd];
         endSlider.Limits = [0, tEnd];
         startSlider.Value = 0;
@@ -898,12 +1177,28 @@ function DAQ_Calibration_App()
         updateRangePlot();
     end
 
-    function [t, raw, seq, nBytes] = loadRecords(fpath)
-        % 8-byte records, little endian: u32 timestamp_us, i16 reading, u16 seq
+    function showFileCal()
+        % The calibration that loadRecords found in the loaded file
+        if isempty(calLbl) || ~isvalid(calLbl)
+            return;
+        end
+        if plotCal.valid
+            calLbl.Text = sprintf('Calibration in the file: %s  (valid blocks: %d)', calText(plotCal, ', '), plotCal.nBlocks);
+        else
+            calLbl.Text = 'Calibration in the file: none';
+        end
+    end
+
+    function [sets, nBytes, cal] = loadRecords(fpath)
+        % 8-byte records, little endian (firmware record.h). Bit 7 of byte 8 selects the sensor.
+        % PT: u32 timestamp_us, i16 reading, 15-bit seq. Load cell: u32 timestamp_us, i24 reading, 7-bit seq.
+        % META record: timestamp_us of 0xFFFFFFF0 or more (kind = timestamp_us - 0xFFFFFFF0), bytes 5..8 = payload.
+        % It is not a sample: the calibration of the DAQ is in the META records (see calFromMeta).
+        sets = struct('t', {[], []}, 'raw', {[], []}, 'seq', {[], []});
         nBytes = 0;
+        cal = noCal();
         fid = fopen(fpath, 'r');
         if fid == -1
-            t = []; raw = []; seq = [];
             return;
         end
         bytes = fread(fid, inf, 'uint8=>uint8');
@@ -911,13 +1206,79 @@ function DAQ_Calibration_App()
         nBytes = numel(bytes);
         n = floor(numel(bytes) / 8);
         if n == 0
-            t = []; raw = []; seq = [];
             return;
         end
         r = reshape(bytes(1:n*8), 8, n);
         ts = double(typecast(reshape(r(1:4, :), [], 1), 'uint32'));
-        raw = double(typecast(reshape(r(5:6, :), [], 1), 'int16'));
-        seq = double(typecast(reshape(r(7:8, :), [], 1), 'uint16'));
+
+        % Take the META records out first: the sensor decoding below does not see them
+        isMeta = ts >= 4294967280; % 0xFFFFFFF0
+        if any(isMeta)
+            cal = calFromMeta(ts(isMeta) - 4294967280, r(5:8, isMeta), find(isMeta));
+            r = r(:, ~isMeta);
+            ts = ts(~isMeta);
+            n = size(r, 2);
+            if n == 0
+                return;
+            end
+        end
+        isLc = bitand(r(8, :)', 128) ~= 0;
+        % In a file of the firmware before the load cell, that bit is a seq bit: it changes once in 32768 records.
+        if sum(diff(isLc) ~= 0) * 16384 < n
+            isLc(:) = false;
+        end
+
+        pt = ~isLc;
+        if any(pt)
+            sets(1).raw = double(typecast(reshape(r(5:6, pt), [], 1), 'int16'));
+            sets(1).seq = mod(double(typecast(reshape(r(7:8, pt), [], 1), 'uint16')), 32768);
+            sets(1).t = secondsOf(ts(pt));
+        end
+        if any(isLc)
+            raw = double(r(5, isLc))' + 256 * double(r(6, isLc))' + 65536 * double(r(7, isLc))';
+            raw(raw >= 2^23) = raw(raw >= 2^23) - 2^24;
+            sets(2).raw = raw;
+            sets(2).seq = double(bitand(r(8, isLc), 127))';
+            sets(2).t = secondsOf(ts(isLc));
+        end
+        if any(pt) && any(isLc)
+            % The sensors use one clock: keep their relative time. Time 0 is the first sample of the file.
+            firstPt = ts(find(pt, 1));
+            firstLc = ts(find(isLc, 1));
+            d = mod(firstLc - firstPt + 2^31, 2^32) - 2^31; % us from the first PT sample to the first load cell sample
+            sets(1).t = sets(1).t + max(-d, 0) / 1e6;
+            sets(2).t = sets(2).t + max(d, 0) / 1e6;
+        end
+    end
+
+    function cal = calFromMeta(kind, pay, idx)
+        % The calibration block: 6 META records in a row with the kinds 1 to 6 (firmware record.h):
+        %   1 = flags (bits 31..24: bit 0 PT, bit 1 load cell) and revision (bits 23..0), 2..5 = float32 PT A, PT B, LC A, LC B,
+        %   6 = zlib CRC-32 of the 20 payload bytes of the kinds 1 to 5. The file has the block again every 30 s: the last valid one counts.
+        % kind: kind of each META record (column), pay: their payload bytes (4 x M, uint8), idx: their place in the file
+        cal = noCal();
+        M = numel(kind);
+        starts = find(kind(1:max(M - 5, 0)) == 1);   % a block begins with kind 1 and needs 5 more records
+        for i = starts(:)'
+            if ~isequal(kind(i:i+5), (1:6)') || idx(i+5) - idx(i) ~= 5
+                continue;   % not in order, or a sample record between them
+            end
+            body = reshape(pay(:, i:i+4), [], 1);   % the 20 bytes under the CRC
+            if crc32Of(body) ~= double(typecast(pay(:, i+5), 'uint32'))
+                continue;   % also when crc32Of gives NaN (no Java)
+            end
+            hd = double(typecast(pay(:, i), 'uint32'));   % flags and revision
+            fl = double(typecast(body(5:20), 'single'));   % PT A, PT B, LC A, LC B
+            cal.valid = true;
+            cal.nBlocks = cal.nBlocks + 1;
+            cal.rev = mod(hd, 2^24);
+            cal.ptSet = bitand(floor(hd / 2^24), 1) ~= 0;
+            cal.lcSet = bitand(floor(hd / 2^24), 2) ~= 0;
+            cal.ptA = fl(1); cal.ptB = fl(2); cal.lcA = fl(3); cal.lcB = fl(4);
+        end
+    end
+
+    function t = secondsOf(ts)
         dt = diff(ts);
         dt(dt < 0) = dt(dt < 0) + 2^32; % the timestamp wraps after 71 min
         t = [0; cumsum(dt)] / 1e6;
@@ -959,13 +1320,39 @@ function DAQ_Calibration_App()
             warnLbl.Text = '';
             return;
         end
+        if plotSensor == 1
+            scale = 0.1875e-3;
+            rawName = 'ADS1115 counts';
+        else
+            scale = lcMvVPerCount;
+            rawName = 'NAU7802 counts';
+        end
+        % A and B: the calibration of the file if it has one for this sensor, else the values of the app
+        fileSet = [plotCal.ptSet, plotCal.lcSet];
+        fileA = [plotCal.ptA, plotCal.lcA];
+        fileB = [plotCal.ptB, plotCal.lcB];
+        if plotCal.valid && fileSet(plotSensor) && isfinite(fileA(plotSensor)) && isfinite(fileB(plotSensor))
+            fitA = fileA(plotSensor);
+            fitB = fileB(plotSensor);
+            calSrc = ' [file cal]';
+        elseif plotSensor == sensorIdx
+            fitA = currentA;
+            fitB = currentB;
+            calSrc = ' [app cal]';
+        else
+            fitA = sensorSaved(plotSensor).A;
+            fitB = sensorSaved(plotSensor).B;
+            calSrc = ' [app cal]';
+        end
         switch unitDrop.Value
             case 'Raw counts'
-                y = plotRaw; yl = 'ADS1115 counts';
+                y = plotRaw; yl = rawName;
             case 'Pressure (PSI, Ax+B)'
-                y = currentA .* (plotRaw * 0.1875e-3) + currentB; yl = 'Pressure (PSI)';
+                y = fitA .* (plotRaw * scale) + fitB; yl = ['Pressure (PSI)', calSrc];
+            case 'Force (N, Ax+B)'
+                y = fitA .* (plotRaw * scale) + fitB; yl = ['Force (N)', calSrc];
             otherwise
-                y = plotRaw * 0.1875e-3; yl = 'Voltage (V)';
+                y = plotRaw * scale; yl = unitDrop.Value;
         end
         yk = y(k);
         tk = plotT(k);
@@ -1003,7 +1390,7 @@ function DAQ_Calibration_App()
         ylabel(axF, yl);
         grid(axF, 'on');
 
-        ds = mod(diff(plotSeq(k)), 65536);
+        ds = mod(diff(plotSeq(k)), 32768 - (plotSensor == 2) * (32768 - 128)); % each sensor has its own seq size
         lost = sum(ds(ds > 1) - 1);
         statsLbl.Text = sprintf('%d samples  %.3f s   mean %.4f  min %.4f  max %.4f  std %.4f   lost samples %d', ...
             m, tk(end) - tk(1), mean(yk), min(yk), max(yk), std(yk), lost);
@@ -1044,6 +1431,12 @@ function DAQ_Calibration_App()
         end
         if calDataFile ~= -1
             fclose(calDataFile);
+        end
+        if otherLiveFile ~= -1
+            fclose(otherLiveFile);
+        end
+        if otherCalFile ~= -1
+            fclose(otherCalFile);
         end
         if ~isempty(calFig) && isvalid(calFig)
             delete(calFig);
