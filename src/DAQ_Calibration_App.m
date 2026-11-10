@@ -52,6 +52,8 @@ function DAQ_Calibration_App()
     lineV = [];
     lineP = [];
     calFig = [];           % Handle for the calibration window
+    wifiFig = []; wifiF = struct();   % WiFi / Telemetry window and its fields
+    wifiPassSet = false;   % the DAQ has a WiFi password (it never sends the password back)
     calFitLine = [];       % Handle for the dashed fit line in cal window
     calTransientLine = []; % Live transient point on the calibration curve
     calTxt = [];           % Handle for the error text area in cal window
@@ -86,8 +88,9 @@ function DAQ_Calibration_App()
     fig = uifigure('Name', 'DAQ Calibration Tool', 'Position', [100, 100, 1100, 710]);
 
     % DAQ chain row: the boards on the UART chain and the one on USB
-    chainLbl = uilabel(fig, 'Position', [20, 675, 900, 22], 'Text', 'DAQs in chain: (not connected)', 'FontWeight', 'bold');
+    chainLbl = uilabel(fig, 'Position', [20, 675, 760, 22], 'Text', 'DAQs in chain: (not connected)', 'FontWeight', 'bold');
     btnFiles = uibutton(fig, 'Position', [940, 675, 140, 22], 'Text', 'Files & Plot...', 'ButtonPushedFcn', @openFilesWindow);
+    btnWifi = uibutton(fig, 'Position', [790, 675, 140, 22], 'Text', 'WiFi / Telemetry...', 'ButtonPushedFcn', @openWifiWindow);
     downloadDir = fullfile(outDir, 'Downloads');
 
     % Status, Connection, and Window Size Controls
@@ -608,6 +611,11 @@ function DAQ_Calibration_App()
         elseif startsWith(t, 'CAL:OK')
             applyCalReply(t);
         end
+
+        % Reply of WIFI GET / WIFI MODE / WIFI SSID / WIFI PASS / TELEM SERVER / TELEM DECIM / REBOOT
+        if startsWith(t, 'WIFI:') || startsWith(t, 'REBOOT:')
+            applyWifiReply(t);
+        end
     end
 
     function updateChainLabel()
@@ -762,6 +770,196 @@ function DAQ_Calibration_App()
             parts = {'no sensor calibrated'};
         end
         str = sprintf('rev %d, %s', c.rev, strjoin(parts, sep));
+    end
+
+    % =====================================================================
+    % --- WiFi / Telemetry window (WIFI, TELEM and REBOOT commands) ---
+    % The mode and the settings go to the flash of the DAQ that is on USB. They start after the next reboot of that DAQ.
+    %   OFF      no WiFi at all (the DAQ only records)
+    %   UPLOAD   the DAQ near the rocket: sends every Nth sample to the server
+    %   DOWNLOAD the DAQ in the bunker: gets the data from the server and prints it (view it with DAQ_Live_Monitor)
+    % =====================================================================
+    function openWifiWindow(~, ~)
+        if ~isempty(wifiFig) && isvalid(wifiFig)
+            figure(wifiFig);
+            return;
+        end
+        wifiFig = uifigure('Name', 'WiFi / Telemetry of the connected DAQ', 'Position', [250, 150, 560, 470]);
+        y = 425;
+        uilabel(wifiFig, 'Position', [20, y, 130, 22], 'Text', 'WiFi mode:');
+        wifiF.mode = uidropdown(wifiFig, 'Position', [160, y, 160, 22], 'Items', {'OFF', 'UPLOAD', 'DOWNLOAD'}, 'Value', 'OFF');
+        y = y - 35;
+        uilabel(wifiFig, 'Position', [20, y, 130, 22], 'Text', 'Hotspot name (SSID):');
+        wifiF.ssid = uieditfield(wifiFig, 'text', 'Position', [160, y, 380, 22]);
+        y = y - 30;
+        uilabel(wifiFig, 'Position', [20, y, 130, 22], 'Text', 'Hotspot password:');
+        wifiF.pass = uieditfield(wifiFig, 'text', 'Position', [160, y, 250, 22]);
+        wifiF.clearPass = uicheckbox(wifiFig, 'Position', [420, y, 130, 22], 'Text', 'No password');
+        y = y - 30;
+        wifiF.passInfo = uilabel(wifiFig, 'Position', [160, y, 380, 22], 'Text', '', 'FontAngle', 'italic');
+        y = y - 30;
+        uilabel(wifiFig, 'Position', [20, y, 130, 22], 'Text', 'Server host / IP:');
+        wifiF.host = uieditfield(wifiFig, 'text', 'Position', [160, y, 250, 22]);
+        uilabel(wifiFig, 'Position', [420, y, 40, 22], 'Text', 'Port:');
+        wifiF.port = uieditfield(wifiFig, 'numeric', 'Position', [460, y, 80, 22], 'Value', 48613, ...
+            'Limits', [1 65535], 'RoundFractionalValues', 'on', 'ValueDisplayFormat', '%d');
+        y = y - 30;
+        uilabel(wifiFig, 'Position', [20, y, 130, 22], 'Text', 'Server token:');
+        wifiF.token = uieditfield(wifiFig, 'text', 'Position', [160, y, 250, 22]);
+        y = y - 30;
+        wifiF.tokenInfo = uilabel(wifiFig, 'Position', [160, y, 380, 22], 'Text', '(16 characters at most. Empty = keep the token in the DAQ.)', 'FontAngle', 'italic');
+        y = y - 30;
+        uilabel(wifiFig, 'Position', [20, y, 130, 22], 'Text', 'Keep every Nth:');
+        uilabel(wifiFig, 'Position', [160, y, 30, 22], 'Text', 'PT');
+        wifiF.dpt = uieditfield(wifiFig, 'numeric', 'Position', [190, y, 60, 22], 'Value', 15, 'Limits', [1 1000], ...
+            'RoundFractionalValues', 'on', 'ValueDisplayFormat', '%d');
+        uilabel(wifiFig, 'Position', [270, y, 80, 22], 'Text', 'Load cell');
+        wifiF.dlc = uieditfield(wifiFig, 'numeric', 'Position', [340, y, 60, 22], 'Value', 5, 'Limits', [1 1000], ...
+            'RoundFractionalValues', 'on', 'ValueDisplayFormat', '%d');
+        y = y - 28;
+        wifiF.rateInfo = uilabel(wifiFig, 'Position', [160, y, 380, 22], 'Text', '', 'FontAngle', 'italic');
+        wifiF.dpt.ValueChangedFcn = @wifiRateText;
+        wifiF.dlc.ValueChangedFcn = @wifiRateText;
+        wifiRateText();
+        y = y - 40;
+        uibutton(wifiFig, 'Position', [20, y, 150, 28], 'Text', 'Read from DAQ', 'ButtonPushedFcn', @wifiRead);
+        uibutton(wifiFig, 'Position', [185, y, 150, 28], 'Text', 'Send to DAQ', 'ButtonPushedFcn', @wifiSend);
+        uibutton(wifiFig, 'Position', [350, y, 190, 28], 'Text', 'Reboot DAQ (applies it)', 'ButtonPushedFcn', @wifiReboot);
+        y = y - 40;
+        wifiF.status = uilabel(wifiFig, 'Position', [20, y - 40, 520, 70], 'Text', 'Press "Read from DAQ" first.', ...
+            'VerticalAlignment', 'top', 'WordWrap', 'on');
+        wifiFig.CloseRequestFcn = @(src, ~) delete(src);
+    end
+
+    function wifiRateText(~, ~)
+        % The rates of the DAQ: PT 883 SPS, load cell 320 SPS
+        wifiF.rateInfo.Text = sprintf('= %.1f Hz PT, %.1f Hz load cell to the server', 883 / wifiF.dpt.Value, 320 / wifiF.dlc.Value);
+    end
+
+    function ok = wifiReady()
+        ok = daqReadyForCal();
+        if ok && (isempty(wifiFig) || ~isvalid(wifiFig))
+            ok = false;
+        end
+    end
+
+    function wifiRead(~, ~)
+        if ~wifiReady(), return; end
+        wifiF.status.Text = 'Reading from the DAQ...';
+        try
+            writeline(s, "WIFI GET");
+        catch
+            wifiF.status.Text = 'Could not send the command to the DAQ.';
+        end
+    end
+
+    function wifiSend(~, ~)
+        if ~wifiReady(), return; end
+        mode = wifiF.mode.Value;
+        ssid = strtrim(wifiF.ssid.Value);
+        host = strtrim(wifiF.host.Value);
+        token = strtrim(wifiF.token.Value);
+        pass = wifiF.pass.Value;
+        if ~strcmp(mode, 'OFF') && (isempty(ssid) || isempty(host))
+            uialert(wifiFig, 'UPLOAD and DOWNLOAD need the hotspot name and the server host.', 'Missing values');
+            return;
+        end
+        if length(ssid) > 32 || length(pass) > 63 || length(token) > 16 || any(isspace(host)) || any(isspace(token)) || length(host) > 63
+            uialert(wifiFig, 'SSID: 32 characters at most. Password: 63. Token: 16, no spaces. Host: 63, no spaces.', 'Value too long');
+            return;
+        end
+        cmds = {};
+        if ~isempty(ssid), cmds{end+1} = ['WIFI SSID ', ssid]; end
+        if ~isempty(pass)
+            cmds{end+1} = ['WIFI PASS ', pass];
+        elseif wifiF.clearPass.Value
+            cmds{end+1} = 'WIFI PASS';
+        end
+        if ~isempty(host)
+            if isempty(token) && daqHasToken()
+                uialert(wifiFig, 'Type the token again: the DAQ can only set the host, the port, and the token together.', 'Token needed');
+                return;
+            end
+            cmds{end+1} = sprintf('TELEM SERVER %s %d %s', host, round(wifiF.port.Value), token);
+        end
+        cmds{end+1} = sprintf('TELEM DECIM %d %d', round(wifiF.dpt.Value), round(wifiF.dlc.Value));
+        cmds{end+1} = ['WIFI MODE ', mode];
+        wifiF.status.Text = 'Sending...';
+        try
+            for k = 1:numel(cmds)
+                writeline(s, string(cmds{k}));
+                pause(0.2);          % the DAQ writes each value to its flash
+            end
+            writeline(s, "WIFI GET");
+        catch
+            wifiF.status.Text = 'Could not send the commands to the DAQ.';
+        end
+    end
+
+    function tf = daqHasToken()
+        % The DAQ reports only that a token exists. With no token typed, the server command would delete it.
+        tf = wifiF.tokenInfo.UserData;
+        if isempty(tf), tf = false; end
+    end
+
+    function wifiReboot(~, ~)
+        if ~wifiReady(), return; end
+        sel = uiconfirm(wifiFig, ['The DAQ restarts and starts the saved WiFi mode. ', ...
+            'It must not be recording. The USB link drops: wait about 5 s, then press Auto-Connect.'], 'Reboot the DAQ', ...
+            'Options', {'Reboot', 'Cancel'}, 'DefaultOption', 'Cancel', 'CancelOption', 'Cancel');
+        if ~strcmp(sel, 'Reboot'), return; end
+        try
+            writeline(s, "REBOOT");
+            wifiF.status.Text = 'Reboot sent...';
+        catch
+            wifiF.status.Text = 'Could not send the command to the DAQ.';
+        end
+    end
+
+    function applyWifiReply(t)
+        if startsWith(t, 'WIFI:ERR') || startsWith(t, 'REBOOT:ERR')
+            if ~isempty(wifiFig) && isvalid(wifiFig), wifiF.status.Text = ['DAQ error: ', strtrim(regexprep(t, '^(WIFI|REBOOT):ERR', ''))]; end
+            return;
+        end
+        if startsWith(t, 'REBOOT:OK')
+            if ~isempty(wifiFig) && isvalid(wifiFig), wifiF.status.Text = 'The DAQ restarts. Wait about 5 s, then press Auto-Connect.'; end
+            return;
+        end
+        tok = regexp(t, ['^WIFI:OK\s+mode=(\w+)\s+run=(\w+)\s+port=(\d+)\s+host=(\S+)\s+token_set=(\d)\s+pass_set=(\d)', ...
+            '\s+decim_pt=(\d+)\s+decim_lc=(\d+)\s+link=(\d)\s+wifi=(\d)\s+rssi=(-?\d+)\s+drops=(\d+)\s+sent=(\d+)', ...
+            '\s+reconnects=(\d+)\s+ssid=(.*)$'], 'tokens', 'once');
+        if isempty(tok) || isempty(wifiFig) || ~isvalid(wifiFig)
+            return;
+        end
+        wifiPassSet = tok{6} == '1';
+        wifiF.mode.Value = tok{1};
+        wifiF.ssid.Value = tok{15};
+        if ~strcmp(tok{4}, '-'), wifiF.host.Value = tok{4}; end
+        wifiF.port.Value = str2double(tok{3});
+        wifiF.dpt.Value = str2double(tok{7});
+        wifiF.dlc.Value = str2double(tok{8});
+        wifiF.pass.Value = '';
+        wifiF.token.Value = '';
+        wifiF.tokenInfo.UserData = tok{5} == '1';
+        if wifiPassSet
+            wifiF.passInfo.Text = '(a password is saved in the DAQ. Leave empty to keep it.)';
+        else
+            wifiF.passInfo.Text = '(no password saved in the DAQ)';
+        end
+        if tok{5} == '1'
+            wifiF.tokenInfo.Text = '(a token is saved in the DAQ. Type it again to send the server settings.)';
+        else
+            wifiF.tokenInfo.Text = '(no token saved. 16 characters at most.)';
+        end
+        wifiRateText();
+        link = {'no', 'yes'};
+        msg = sprintf('Saved mode: %s. Running now: %s.', tok{1}, tok{2});
+        if ~strcmp(tok{1}, tok{2})
+            msg = [msg, ' The saved mode starts after a reboot (or the settings are not complete).'];
+        end
+        msg = sprintf('%s\nWiFi connected: %s. Link to the server: %s. RSSI %s dBm. Dropped %s. Frames sent %s. Reconnects %s.', msg, ...
+            link{(tok{10} == '1') + 1}, link{(tok{9} == '1') + 1}, tok{11}, tok{12}, tok{13}, tok{14});
+        wifiF.status.Text = msg;
     end
 
     % =====================================================================
@@ -967,13 +1165,14 @@ function DAQ_Calibration_App()
         uibutton(pnlB, 'Position', [120, 10, 210, 26], 'Text', 'Download Selected', 'ButtonPushedFcn', @downloadSelected);
 
         % Downloaded files in the local folder
-        pnlL = uipanel(filesFig, 'Title', 'Downloaded Files (select one to plot)', 'FontWeight', 'bold', 'Position', [10, 10, 340, 350]);
+        pnlL = uipanel(filesFig, 'Title', 'Local Files: downloads and live data (select one to plot)', 'FontWeight', 'bold', 'Position', [10, 10, 340, 350]);
         dirField = uieditfield(pnlL, 'text', 'Position', [10, 295, 235, 22], 'Value', downloadDir, ...
             'ValueChangedFcn', @(src, ~) setDownloadDir(src.Value));
         uibutton(pnlL, 'Position', [250, 295, 80, 22], 'Text', 'Browse...', 'ButtonPushedFcn', @browseDir);
-        localList = uilistbox(pnlL, 'Position', [10, 45, 320, 240], 'Items', {}, 'ValueChangedFcn', @plotSelected);
-        uibutton(pnlL, 'Position', [10, 10, 100, 26], 'Text', 'Rescan Folder', 'ButtonPushedFcn', @(~, ~) refreshLocalFiles());
-        uibutton(pnlL, 'Position', [120, 10, 210, 26], 'Text', 'Plot Selected', 'ButtonPushedFcn', @plotSelected);
+        localList = uilistbox(pnlL, 'Position', [10, 45, 320, 240], 'Items', {}, 'ItemsData', {}, 'ValueChangedFcn', @plotSelected);
+        uibutton(pnlL, 'Position', [10, 10, 100, 26], 'Text', 'Rescan', 'ButtonPushedFcn', @(~, ~) refreshLocalFiles());
+        uibutton(pnlL, 'Position', [120, 10, 100, 26], 'Text', 'Plot Selected', 'ButtonPushedFcn', @plotSelected);
+        uibutton(pnlL, 'Position', [230, 10, 100, 26], 'Text', 'Export CSV', 'ButtonPushedFcn', @exportCsv);
 
         % Plot with start / end range sliders
         axF = uiaxes(filesFig, 'Position', [360, 210, 790, 500]);
@@ -1124,19 +1323,49 @@ function DAQ_Calibration_App()
     end
 
     function refreshLocalFiles()
+        % The downloaded .BIN files (download folder) and the live data CSV files of the app (output folder)
         if isempty(localList) || ~isvalid(localList)
             return;
         end
         d = dir(fullfile(downloadDir, '*.BIN'));
-        localList.Items = {d.name};
+        L = dir(fullfile(outDir, 'live_data*.csv'));
+        [~, order] = sort([L.datenum], 'descend');   % newest live file first
+        L = L(order);
+        names = [{d.name}, cellfun(@(n) ['[live] ', n], {L.name}, 'UniformOutput', false)];
+        paths = [strcat({d.folder}, filesep, {d.name}), strcat({L.folder}, filesep, {L.name})];
+        keep = localList.Value;
+        localList.Items = names;
+        localList.ItemsData = paths;
+        if ~isempty(keep) && any(strcmp(paths, keep))
+            localList.Value = keep;
+        end
     end
 
     function plotSelected(~, ~)
-        name = localList.Value;
-        if isempty(name)
+        fpath = localList.Value;
+        if isempty(fpath)
             return;
         end
-        [plotSets, plotBytes, plotCal] = loadRecords(fullfile(downloadDir, name));
+        [~, base, ext] = fileparts(fpath);
+        name = [base, ext];
+        if strcmpi(ext, '.csv')
+            [sets, nLive] = loadLiveCsv(fpath);
+            plotSets = sets; plotBytes = dir(fpath).bytes; plotCal = noCal();
+            plotName = name;
+            showFileCal();
+            fprintf('Loaded %s: %d live samples\n', name, nLive);
+            if nLive == 0
+                cla(axF);
+                title(axF, [name, ' (no samples)'], 'Interpreter', 'none');
+                statsLbl.Text = '';
+                plotT = [];
+                return;
+            end
+            sensorDropF.Value = sensorDropF.Items{1 + ~isempty(sets(2).t)};
+            selectPlotSensor();
+            return;
+        end
+        [plotSets, plotBytes, plotCal] = loadRecords(fpath);
         plotName = name;
         showFileCal();
         nPt = numel(plotSets(1).t);
@@ -1153,6 +1382,89 @@ function DAQ_Calibration_App()
             sensorDropF.Value = sensorDropF.Items{1 + (nPt == 0)}; % the sensor that has data
         end
         selectPlotSensor();
+    end
+
+    function exportCsv(~, ~)
+        % One CSV with the PT samples, the load cell samples (sorted by time), and the calibration of the file
+        fpath = localList.Value;
+        if isempty(fpath) || ~endsWith(fpath, '.BIN', 'IgnoreCase', true)
+            uialert(filesFig, 'Select a downloaded .BIN file in the list.', 'Nothing Selected');
+            return;
+        end
+        dlg = uiprogressdlg(filesFig, 'Title', 'Export CSV', 'Message', 'Reading and converting...', 'Indeterminate', 'on');
+        try
+            [sets, ~, cal] = loadRecords(fpath);
+            [~, base] = fileparts(fpath);
+            outPath = fullfile(fileparts(fpath), [base, '.csv']);
+            scale = [0.1875e-3, lcMvVPerCount];
+            A = [cal.ptA, cal.lcA]; B = [cal.ptB, cal.lcB];
+            isSet = [cal.ptSet, cal.lcSet] & cal.valid;
+            blocks = cell(1, 2);
+            for k = 1:2
+                n = numel(sets(k).t);
+                if n == 0, continue; end
+                nat = sets(k).raw * scale(k);
+                if isSet(k)
+                    cv = A(k) .* nat + B(k);
+                    a = A(k); b = B(k); rev = cal.rev;
+                else
+                    cv = nan(n, 1); a = NaN; b = NaN; rev = NaN;
+                end
+                blocks{k} = [repmat(k, n, 1), sets(k).t(:), sets(k).seq(:), sets(k).raw(:), nat(:), cv(:), ...
+                    repmat([a, b, rev], n, 1)];
+            end
+            M = vertcat(blocks{:});
+            if isempty(M)
+                close(dlg);
+                uialert(filesFig, 'The file has no sample records.', 'Nothing to Export');
+                return;
+            end
+            M = sortrows(M, 2);   % by time
+            dlg.Message = sprintf('Writing %d rows...', size(M, 1));
+            sensorName = repmat("PT", size(M, 1), 1);
+            sensorName(M(:, 1) == 2) = "LC";
+            T = table(sensorName, M(:, 2), M(:, 3), M(:, 4), M(:, 5), M(:, 6), M(:, 7), M(:, 8), M(:, 9), 'VariableNames', ...
+                {'sensor', 'time_s', 'seq', 'raw_count', 'volts_or_mV_per_V', 'calibrated_PSI_or_N', 'cal_A', 'cal_B', 'cal_revision'});
+            writetable(T, outPath);
+            close(dlg);
+            uialert(filesFig, sprintf('Written %d rows:\n%s', size(M, 1), outPath), 'Export Done', 'Icon', 'success');
+        catch ME
+            if isvalid(dlg), close(dlg); end
+            where = '';
+            if ~isempty(ME.stack)
+                where = sprintf('\n(in %s, line %d)', ME.stack(1).name, ME.stack(1).line);
+            end
+            uialert(filesFig, [ME.message, where], 'Export Problem');
+        end
+    end
+
+    function [sets, n] = loadLiveCsv(fpath)
+        % live_data_*.csv: "Time,Voltage" (PT, V) or live_data_loadcell_*.csv: "Time,mV/V". The samples are decimated.
+        % The plot code works on raw counts, so the values go back to counts with the scale of the sensor.
+        sets = struct('t', {[], []}, 'raw', {[], []}, 'seq', {[], []});
+        n = 0;
+        fid = fopen(fpath, 'r');
+        if fid == -1
+            return;
+        end
+        c = textscan(fid, '%s %f', 'Delimiter', ',', 'HeaderLines', 1);   % a line being written may be cut: textscan stops there
+        fclose(fid);
+        m = min(numel(c{1}), numel(c{2}));
+        if m == 0
+            return;
+        end
+        tm = datetime(c{1}(1:m), 'InputFormat', 'yyyy-MM-dd HH:mm:ss.SSS');
+        ok = ~isnat(tm) & isfinite(c{2}(1:m));
+        tm = tm(ok); v = c{2}(1:m); v = v(ok);
+        n = numel(v);
+        if n == 0
+            return;
+        end
+        k = 1 + contains(fpath, 'loadcell');
+        scale = [0.1875e-3, lcMvVPerCount];
+        sets(k).t = seconds(tm - tm(1));
+        sets(k).raw = v(:) / scale(k);
+        sets(k).seq = zeros(n, 1);
     end
 
     function selectPlotSensor(~, ~)
@@ -1424,6 +1736,9 @@ function DAQ_Calibration_App()
         end
         if ~isempty(filesFig) && isvalid(filesFig)
             delete(filesFig);
+        end
+        if ~isempty(wifiFig) && isvalid(wifiFig)
+            delete(wifiFig);
         end
         closePort();
         if liveDataFile ~= -1

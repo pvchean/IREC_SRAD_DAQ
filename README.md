@@ -19,6 +19,8 @@ Library: Paranoid-FS v0.3.1 (`src/idf_component.yml`).
 | `daq_nolc` | The real firmware, but the load cell driver talks to an address that does not answer (0x2B). It simulates a board with no NAU7802 in software. |
 | `daq_toggle` | The board with the device ID `DAQ_TOGGLE_ID` (now 5) drives GPIO 16 with a square wave (0 V / 3.3 V, 250 ms per state). The readings then show a signal that you can find in the files. Flash this build to both boards. This build does not start the NAU7802. **Warning:** GPIO 16 is the DRDY pin of the NAU7802. Remove the DRDY wire before you use this build. If you do not, two outputs fight each other. |
 
+**Build with PlatformIO's own `pio`:** `~/.platformio/penv/bin/pio run -e daq`. The `pio` of the system (`/usr/bin/pio`) runs esptool with `/usr/bin/python`, which has no `intelhex` module, so the build stops at `bootloader.bin` with `No module named 'intelhex'`. The error does not come from the source code. To use the system `pio`, install the module in the system Python.
+
 ## Pins
 Mode 1 = GPIO 1 (high: auto-record, low: manual; the button pulls it low), Mode 2 = GPIO 2 (high: serial,
 low: files; not used yet), ADDR0/1/2 = GPIO 9/48/38 = device ID 0..7. All other pins: `src/board.h`.
@@ -122,6 +124,7 @@ Same replies as the Arduino sketch: `MATLAB PING` (banner, then live readings), 
 `FLUSH` (`SD_FLUSHED:OK`). New: `PING` (banner only), `INFO` (details), `PFSFLUSH` (close the PFS file), `STREAM OFF`,
 `REC ON|OFF`, `LIST`, `SDLS`,
 `CHECK [file [n]]`, `DUMP file offset len`, `LED 0..255`, `STREAM ON`, `CAL GET`, `CAL PT <A> <B>`, `CAL LC <A> <B>`.
+The WiFi commands (`WIFI`, `TELEM`, `REBOOT`) are in the section "Live telemetry over WiFi".
 A line without a line end runs after 500 ms (as the sketch: MATLAB sends `MATLAB PING` without `\n`).
 
 ### Live lines
@@ -222,6 +225,71 @@ Live view:
 - The app finds the calibration blocks in the file (the last valid block counts) and shows it in a label under the plot. The units
   *Pressure (PSI, Ax+B)* and *Force (N, Ax+B)* use A and B of the file if it has them for that sensor. If not, they use the values
   in the app. The y-axis label says `[file cal]` or `[app cal]`.
+
+## Live telemetry over WiFi
+For the static fire, nobody can be near the rocket. A DAQ near the rocket sends decimated data over WiFi (a phone hotspot) to a
+server on the internet. A DAQ in the safety bunker gets the data from the server and prints it on USB. The server is in `server/`
+(C++, Docker, see `server/README.md`). The frame format is in `server/telem_proto.h`. The DAQ code is in `src/telem.c`.
+
+### Modes
+All DAQs run the same firmware. The WiFi mode is saved in the flash and is read once at boot. A new mode starts after a reboot.
+
+| Mode | Use | What it does |
+| :-- | :-- | :-- |
+| `OFF` (default) | Every DAQ that only records | No WiFi code runs. No radio, no task, no buffer. The sink does one test of a variable for each sample. |
+| `UPLOAD` | DAQ near the rocket | Keeps every Nth sample of each sensor and sends them to the server in batches. |
+| `DOWNLOAD` | DAQ in the bunker | Gets the data from the server and prints it on the USB live stream. It does **not** print its own sensors. |
+
+If the mode is `UPLOAD` or `DOWNLOAD` but the SSID or the server is not set, the DAQ stays in `OFF` (`run=OFF` in the reply of `WIFI GET`).
+
+### Commands
+Each command saves to the flash. The reply is one line, `WIFI:OK ...` or `WIFI:ERR <reason>`. The password is never sent back.
+- `WIFI GET`: the saved mode (`mode=`), the mode of this boot (`run=`), the settings, the link state, RSSI, dropped samples.
+- `WIFI MODE OFF|UPLOAD|DOWNLOAD`, `WIFI SSID <name>`, `WIFI PASS <password>` (the SSID and the password are the rest of the line, so
+  they can hold spaces; no text = an open network).
+- `TELEM SERVER <host> <port> <token>` (the token has 16 characters at most), `TELEM DECIM <pt> <lc>` (keep every Nth sample, 1 to 1000;
+  the defaults 15 and 5 give 59 Hz and 64 Hz), `TELEM STATUS` (same reply as `WIFI GET`).
+- `REBOOT`: saves the open files and restarts. It refuses while recording is on. (The profile builds keep their own `REBOOT [WRAP]`.)
+
+The MATLAB app `DAQ_Calibration_App` has a *WiFi / Telemetry...* window that sends these commands (button next to *Files & Plot...*).
+
+### UPLOAD mode (`telem_push`, `upload_task`)
+- The sink calls `telem_push()` for each sample. It keeps every Nth sample (PT and load cell count separately), and writes it into a
+  ring of 8192 records (64 KB) in the PSRAM. It never waits. When the ring is full, the oldest record goes and `drops` goes up.
+- The task `telem` runs on **core 0**, priority 2, as the WiFi task. The ADS1115 ISR and the PFS writer are on core 1 and are not touched.
+  The task starts after the PFS mount, so the mount time does not change.
+- Every 500 ms, it sends one frame for each sensor (`DATA_PT`, `DATA_LC`). It sends the calibration block (`CAL`) at the start, when the
+  values change, and every 30 s. It sends `STATUS` (RSSI, drops, queue, uptime, reconnects) every 2 s.
+- The link breaks on any error, or after a send time-out of 3 s. The task then reconnects (wait 1 s, then up to 10 s). After a reconnect it throws
+  away the ring, so the viewer gets the present. The old data stays in the NAND and SD files. The telemetry never saves or re-sends data.
+- Power-save of the WiFi modem is off (it adds delay and lost frames). This raises the current, so test with the real power supply (brown-out level 3 is on).
+- The hotspot must be 2.4 GHz (iPhone: "Maximize Compatibility").
+- Hello flag `CHAIN_HELLO_WIFI` (0x20) and the LED `LED_WIFI` show that the link to the server works.
+
+### DOWNLOAD mode (`download_task`)
+- The task sends `GET(cursor, 4096 bytes, wait 5 s)` and the server answers with a `BATCH` (long poll). The cursor makes the fetch resume
+  after a break. After an outage longer than 10 s, it starts at "now" and skips the missed data (the server archive has it).
+- The records go to the stream buffer with `stream_push_wait()`, which waits for room. `stream.c` prints them as the live lines it always printed
+  (`%.3f` for PT, `L:<count>` for the load cell), so an old reader still works. After each batch it adds these text lines:
+  - `CALRX:OK rev=.. pt_set=.. pt_a=.. pt_b=.. lc_set=.. lc_a=.. lc_b=..` when a calibration block with a good CRC is complete,
+  - `T:DTPT <us>` and `T:DTLC <us>`: the time between two samples of that sensor in the batch (0 = not known),
+  - `T:LINK <drops> <rssi_upload> <rssi_own>`,
+  - `T:AGE <ms>`: the age of the newest data on the server, -1 = none yet. **This line ends the batch.**
+- The stream starts after `MATLAB PING`, as always.
+
+### MATLAB: `DAQ_Live_Monitor`
+Connect it to the DAQ in the bunker (Auto-Connect). It shows PT (PSI) and the load cell (N) on one time axis, with the latest values in large
+type. The samples of a batch get their time from the end of the batch and the sample interval, so a gap in the data stays a gap in the plot.
+The banner is green (`LIVE`, data age), red (`STALE` when the data age is above the limit, or `NO LINK` when no batch comes for 8 s), or orange
+(the DAQ is not in `DOWNLOAD` mode). It also writes `telemetry_live_<time>.csv`. Without a received calibration it shows volts and mV/V.
+
+### Not tested yet
+- The firmware builds (all code compiles with `-Wall -Werror` and links), but it has not run on a board. Not yet measured: free heap and boot time
+  in `OFF` mode against the old firmware, the effect of `UPLOAD` on the PT and load cell sequence numbers (record a file with `UPLOAD` and one
+  with `OFF`, then compare with `tools/rec_stats.py`), reconnect behaviour, the delay, and the cellular data use (expected about 4-5 MB per hour).
+- The server passes its loopback tests (`make test` in `server/`). The Docker files have not been built (no Docker on the development PC).
+- The MATLAB files have not been run (no MATLAB on the development PC).
+- TLS is not used on purpose: it adds complexity that this link does not need. The token stops junk, not an attacker. The data is not secret.
 
 ## Recording
 "Recording" means saving. With recording off, the board still samples both sensors, streams to USB after `MATLAB PING`, and

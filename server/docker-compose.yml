@@ -1,0 +1,26 @@
+# Start:  cp .env.example .env   (set TELEM_TOKEN and TELEM_PORT), then:  docker compose up -d --build
+# Logs:   docker compose logs -f
+# Tests:  docker compose --profile test build test     (the build fails if a test fails)
+services:
+  telemetry:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    environment:
+      TELEM_PORT: ${TELEM_PORT:-48613}
+      TELEM_TOKEN: ${TELEM_TOKEN:?set TELEM_TOKEN in .env}
+      TELEM_RING_MB: ${TELEM_RING_MB:-64}
+    ports:
+      - "${TELEM_PORT:-48613}:${TELEM_PORT:-48613}/tcp"
+    volumes:
+      - telem-data:/data
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+
+volumes:
+  telem-data:

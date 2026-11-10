@@ -1,0 +1,4 @@
+telemetry_server
+test_client_bin
+.env
+frame_compat_bin

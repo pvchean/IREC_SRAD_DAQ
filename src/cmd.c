@@ -12,6 +12,7 @@
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -25,6 +26,7 @@
 #include "record.h"
 #include "sd_log.h"
 #include "stream.h"
+#include "telem.h"
 
 #define CHUNK 1024U                     /* multiple of sizeof(record_t) */
 #define SEEN_MS 3000U                    /* DAQS: a board is in the chain if it sent in this time */
@@ -344,6 +346,73 @@ static void do_cal(const char *sensor, const char *as, const char *bs)
     cal_reply("CAL:OK");
 }
 
+/* ---- WIFI and TELEM: the telemetry link (telem.h). The values are saved in the flash and used after the next reboot.
+     WIFI GET | WIFI MODE OFF|UPLOAD|DOWNLOAD | WIFI SSID <name> | WIFI PASS <password> | TELEM SERVER <host> <port> <token>
+     TELEM DECIM <pt> <lc> | TELEM STATUS | REBOOT
+   The SSID and the password are the rest of the line, so they can hold spaces. WIFI PASS with no text = an open network.
+   Reply (one line, one USB write): "WIFI:OK mode=<saved> run=<this boot> port=.. host=.. token_set=.. pass_set=.. decim_pt=.. decim_lc=..
+   link=.. wifi=.. rssi=.. drops=.. sent=.. reconnects=.. ssid=<name to the end of the line>", or "WIFI:ERR <reason>".
+   The password is never sent back. */
+static const char *mode_name(telem_mode_t m) { return m == TELEM_UPLOAD ? "UPLOAD" : m == TELEM_DOWNLOAD ? "DOWNLOAD" : "OFF"; }
+
+static void wifi_reply(const char *head)
+{
+    telem_info_t t;
+    char line[320];
+    telem_get_info(&t);
+    int len = snprintf(line, sizeof line, "%s mode=%s run=%s port=%u host=%s token_set=%d pass_set=%d decim_pt=%u decim_lc=%u link=%d wifi=%d"
+                       " rssi=%d drops=%lu sent=%lu reconnects=%lu ssid=%s\r\n", head, mode_name(t.saved_mode), mode_name(t.run_mode),
+                       (unsigned)t.port, t.host[0] ? t.host : "-", t.token_set, t.pass_set, (unsigned)t.decim_pt, (unsigned)t.decim_lc,
+                       t.link_up, t.wifi_up, t.rssi, (unsigned long)t.drops, (unsigned long)t.sent_frames, (unsigned long)t.reconnects, t.ssid);
+    fflush(stdout);
+    if (len > 0) { usb_serial_jtag_write_bytes(line, (size_t)len < sizeof line ? (size_t)len : sizeof line - 1U, pdMS_TO_TICKS(50)); }
+}
+
+static char *rest_of_line(void)
+{
+    char *r = strtok(NULL, "");
+    while (r && (*r == ' ' || *r == '\t')) { r++; }
+    return r;
+}
+
+static void do_wifi(const char *sub)
+{
+    bool ok = true;
+    const char *why = "flash write failed";
+    if (!sub || !strcmp(sub, "GET")) { wifi_reply("WIFI:OK"); return; }
+    if (!strcmp(sub, "MODE")) {
+        char *a = strtok(NULL, " \t");
+        telem_mode_t m = (a && !strcmp(a, "OFF")) ? TELEM_OFF : (a && !strcmp(a, "UPLOAD")) ? TELEM_UPLOAD : (a && !strcmp(a, "DOWNLOAD")) ? TELEM_DOWNLOAD : (telem_mode_t)-1;
+        if ((int)m < 0) { ok = false; why = "use WIFI MODE OFF, UPLOAD, or DOWNLOAD"; } else { ok = telem_set_mode(m); }
+    } else if (!strcmp(sub, "SSID")) {
+        char *a = rest_of_line();
+        if (!a || !*a || strlen(a) > 32) { ok = false; why = "the SSID has 1 to 32 characters"; } else { ok = telem_set_ssid(a); }
+    } else if (!strcmp(sub, "PASS")) {
+        char *a = rest_of_line();
+        if (a && strlen(a) > 63) { ok = false; why = "the password has 63 characters at most"; } else { ok = telem_set_pass(a ? a : ""); }
+    } else { ok = false; why = "use WIFI GET, MODE, SSID, or PASS"; }
+    if (ok) { wifi_reply("WIFI:OK"); } else { printf("WIFI:ERR %s\n", why); }
+}
+
+static void do_telem(const char *sub)
+{
+    bool ok = true;
+    const char *why = "flash write failed";
+    if (!sub || !strcmp(sub, "STATUS")) { wifi_reply("WIFI:OK"); return; }
+    if (!strcmp(sub, "SERVER")) {
+        char *h = strtok(NULL, " \t"), *p = h ? strtok(NULL, " \t") : NULL, *t = p ? strtok(NULL, " \t") : NULL;
+        long port = p ? strtol(p, NULL, 10) : 0;
+        if (!h || port < 1 || port > 65535 || (t && strlen(t) > 16) || strlen(h) > 63) { ok = false; why = "use TELEM SERVER <host> <port> <token, 16 characters at most>"; }
+        else { ok = telem_set_server(h, (uint16_t)port, t); }
+    } else if (!strcmp(sub, "DECIM")) {
+        char *a = strtok(NULL, " \t"), *b = a ? strtok(NULL, " \t") : NULL;
+        long pt = a ? strtol(a, NULL, 10) : 0, lc = b ? strtol(b, NULL, 10) : 0;
+        if (pt < 1 || pt > 1000 || lc < 1 || lc > 1000) { ok = false; why = "use TELEM DECIM <pt> <lc>, each 1 to 1000 (keep every Nth sample)"; }
+        else { ok = telem_set_decim((uint16_t)pt, (uint16_t)lc); }
+    } else { ok = false; why = "use TELEM SERVER, DECIM, or STATUS"; }
+    if (ok) { wifi_reply("WIFI:OK"); } else { printf("WIFI:ERR %s\n", why); }
+}
+
 static void do_dump(int file_id, uint64_t off, size_t len)
 {
     uint8_t b[256];
@@ -511,7 +580,21 @@ static void run(char *line)
 #ifdef DAQ_PROFILE
     else if (!strcmp(tok, "PROFILE")) { prof_print(); }
     else if (!strcmp(tok, "REBOOT")) { char *a = strtok(NULL, " \t"); prof_reboot(a && !strcmp(a, "WRAP")); }
+#else
+    else if (!strcmp(tok, "REBOOT")) {            /* a new WiFi mode starts after it. Not while recording: a reset would lose the buffered data. */
+        if (rec_get()) { printf("REBOOT:ERR recording is on, send REC OFF first\n"); }
+        else {
+            (void)pfs_flush(s_pfs, 2000);
+            (void)sd_log_flush(2000);
+            printf("REBOOT:OK\n");
+            fflush(stdout);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            esp_restart();
+        }
+    }
 #endif
+    else if (!strcmp(tok, "WIFI")) { do_wifi(strtok(NULL, " \t")); }
+    else if (!strcmp(tok, "TELEM")) { do_telem(strtok(NULL, " \t")); }
     else if (!strcmp(tok, "DAQS")) { do_daqs(); }
     else if (!strcmp(tok, "FILES")) { do_files(); }
     else if (!strcmp(tok, "CHUNK")) {
@@ -553,7 +636,7 @@ static void run(char *line)
 
 static void cmd_task(void *arg)
 {
-    char line[96];
+    char line[160];                                 /* WIFI PASS holds up to 63 characters */
     size_t n = 0;
     (void)arg;
     for (;;) {

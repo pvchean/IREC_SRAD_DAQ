@@ -30,6 +30,7 @@
 #define CHAIN_HELLO_SENSOR  0x04U     /* the ADS1115 answers */
 #define CHAIN_HELLO_SD      0x08U     /* an SD card is mounted */
 #define CHAIN_HELLO_LOADCELL 0x10U    /* the NAU7802 gives samples */
+#define CHAIN_HELLO_WIFI    0x20U     /* the telemetry link to the server works (telem.h) */
 
 typedef struct {
     uint32_t rx_ok[2], rx_bad[2];     /* valid packets and CRC or format errors, per port */

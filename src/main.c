@@ -29,6 +29,7 @@
 #include "record.h"
 #include "sd_log.h"
 #include "stream.h"
+#include "telem.h"
 
 #define WRITER_STACK 8192U
 #define SCAN_STACK   4096U
@@ -73,7 +74,8 @@ static void sink(const record_t *r)
         emit_cal(rec);
     }
     s_was_rec = rec;
-    stream_push(r);                                            /* live readings, only after MATLAB PING */
+    if (!telem_hide_local()) { stream_push(r); }               /* live readings, only after MATLAB PING; not on the DOWNLOAD DAQ */
+    telem_push(r);                                             /* WiFi UPLOAD mode only: every Nth sample to the ring, never waits */
     if (rec_is_lc(r)) { chain_push_lc(r); }                    /* to the other boards, also when not recording */
     else { chain_push_ads(r); }
     if (rec) {                                                 /* recording = saving: PFS and SD only while on */
@@ -180,7 +182,7 @@ static void led_task(void *a)
         led_set(LED_WORKING, (n / 8) % 2 == 0);
         led_set(LED_RECORDING, rec_get());
         led_set(LED_AUTOREC, io_auto_mode());
-        led_set(LED_WIFI, false);
+        led_set(LED_WIFI, telem_link_up());
         led_set(LED_NAND, st.mounted && !st.degraded && !st.no_storage && st.verify_failures == 0);
         led_set(LED_SD, sd_log_mounted());
         led_set(LED_ERROR, err);
@@ -234,6 +236,7 @@ void app_main(void)
     io_init();                                 /* the level of the mode pins sets recording at power-up */
     PROF(P_IO);
     cal_init();                                /* the calibration values come from the flash */
+    telem_init();                              /* the WiFi mode from the flash (OFF = nothing else happens); no radio yet */
     xTaskCreatePinnedToCore(led_task, "led", 3072, NULL, 1, NULL, 0);
 #ifdef DAQ_TOGGLE
     if (io_addr() == DAQ_TOGGLE_ID) { xTaskCreatePinnedToCore(toggle_task, "toggle", 2048, NULL, 1, NULL, 0); }
@@ -284,6 +287,7 @@ void app_main(void)
     PROF(P_SD);
     cmd_start(s_pfs);
     PROF(P_CMD);
+    telem_start();                             /* after the mount: WiFi (UPLOAD or DOWNLOAD mode only) on core 0 */
 
     for (int n = 0;; n++) {
         pfs_status_t st;

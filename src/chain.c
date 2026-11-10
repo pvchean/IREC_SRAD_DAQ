@@ -15,6 +15,7 @@
 #include "io.h"
 #include "nau7802.h"
 #include "sd_log.h"
+#include "telem.h"
 
 #define SYNC0        0xA5
 #define SYNC1        0x5A
@@ -115,7 +116,8 @@ static void hello_task(void *arg)
     for (;;) {
         uint8_t f = (uint8_t)((rec_get() ? CHAIN_HELLO_REC : 0U) | (io_auto_mode() ? CHAIN_HELLO_AUTO : 0U) |
                               (ads1115_running() ? CHAIN_HELLO_SENSOR : 0U) | (sd_log_mounted() ? CHAIN_HELLO_SD : 0U) |
-                              (nau7802_running() ? CHAIN_HELLO_LOADCELL : 0U));
+                              (nau7802_running() ? CHAIN_HELLO_LOADCELL : 0U) |
+                              (telem_link_up() ? CHAIN_HELLO_WIFI : 0U));
         send_pkt(CHAIN_TYPE_HELLO, 1, &f, 1);
         vTaskDelay(pdMS_TO_TICKS(HELLO_MS));
     }
