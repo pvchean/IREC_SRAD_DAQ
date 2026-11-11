@@ -15,6 +15,13 @@ void files_mode_set_active(bool on);                /* main.c only */
    The weak default logs "files mode: no USB stack yet" and idles forever. */
 void files_mode_usb_start(void);
 
+/* The three ways out of files mode. All end in esp_restart(). With the USB stack (DAQ_MTP_USB) each one first drops D+ with
+   tud_disconnect() so that the host sees a disconnect (Docs/MTP/Spike_Report.md MTP-P-9.2), and repairs the USB Serial/JTAG pad.
+   FM_REBOOT: files mode again (after the 10 s grace). FM_DOWNLOAD: ROM download mode (esptool works with no BOOT button).
+   FM_LEAVE: serial mode once. Only the first caller acts; a second caller waits. Does not return. Used by the CDC commands. */
+typedef enum { FM_REBOOT, FM_DOWNLOAD, FM_LEAVE } files_mode_restart_t;
+void files_mode_restart(files_mode_restart_t how) __attribute__((noreturn));
+
 /* Software way back to serial mode: sets a flag that survives a software reset (RTC no-init RAM), then restarts. At the next
    boot io_usb_files_mode() is false once (the flag is cleared), so the board starts as the serial DAQ even if MODE2 is low.
    The next boot after that follows MODE2 again. Does not return. Also the serial command LEAVE does this. */

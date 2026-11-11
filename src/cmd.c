@@ -582,8 +582,18 @@ static bool files_mode_cmd(const char *tok)
     } else if (!strcmp(tok, "REBOOT")) {          /* restarts in files mode again (no flush: nothing is open) */
         cio_printf("REBOOT:OK\n");
         cio_flush();
+#ifdef DAQ_MTP
+        files_mode_restart(FM_REBOOT);             /* drops D+ first (USB stack), then restarts */
+#else
         vTaskDelay(pdMS_TO_TICKS(200));
         esp_restart();
+#endif
+#ifdef DAQ_MTP
+    } else if (!strcmp(tok, "DL")) {              /* ROM download mode: esptool works with no BOOT button (Spike_Report.md MTP-P-9.2) */
+        cio_printf("DL:OK rebooting to ROM download mode\n");
+        cio_flush();
+        files_mode_restart(FM_DOWNLOAD);
+#endif
     } else if (!strcmp(tok, "LEAVE")) {           /* restarts in serial mode once, with MODE2 still low */
         cio_printf("LEAVE:OK\n");
         cio_flush();

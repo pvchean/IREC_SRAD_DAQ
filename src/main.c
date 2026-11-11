@@ -22,6 +22,9 @@
 #include "chain.h"
 #include "cmd.h"
 #include "files_mode.h"
+#ifdef DAQ_MTP_USB
+#include "usb_files.h"
+#endif
 #include "io.h"
 #include "led_sr.h"
 #include "mtp_store_pfs.h"
@@ -230,6 +233,9 @@ static void files_mode_main(const pfs_config_t *cfg, const pfs_os_hal_t *os, con
                             const pfs_nor_littlefs_cfg_t *nor_cfg)
 {
     files_mode_set_active(true);
+#ifdef DAQ_MTP_USB
+    usb_files_log_start();                                      /* log ring for the CDC command LOG */
+#endif
     io_rec_disable();                                           /* also done in io_init(); the second guard */
     ESP_LOGW(TAG, "FILES MODE (read only): no recording, no sensors, no WiFi");
     xTaskCreatePinnedToCore(led_task, "led", 3072, NULL, 1, NULL, 0);
@@ -267,6 +273,9 @@ static void files_mode_main(const pfs_config_t *cfg, const pfs_os_hal_t *os, con
 void app_main(void)
 {
     /* io_init() ran above: the ADDR2..ADDR0 pins (0..7) are the device ID in each PFS page header. */
+#ifdef DAQ_MTP_USB
+    usb_files_early_init();                    /* FIRST: repair a dirty USB Serial/JTAG pad, PHY to the USB Serial/JTAG (Spike_Report.md MTP-P-11) */
+#endif
     PROF(P_APP_MAIN);
 #ifdef DAQ_NANDREAD
     nand_read_test();                          /* reads only, no mount */
