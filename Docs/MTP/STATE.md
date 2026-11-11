@@ -100,3 +100,11 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
   Without P3: a crash/WDT reset leaves the host a stale device, but a plain replug gives a clean boot + 10 s grace.
 * Builds: spike_force, spike, spike_force_p3 OK. Not flashed. Board still missing (needs human with BOOT). Recovery + test order: Spike_Report.md MTP-P-11.7.
 * Window total agent tokens since 00:00: ~1.75M (incl. opus 247k).
+
+## 03:2x MERGE report (~300k tokens; commits 85e715a..9bc88c5; Merge_Report.md MTP-M-1..9)
+* `-e daq_mtp`, `-e daq_mtp_force` (files mode without the MODE2 switch), `-e daq` build clean; `daq` unchanged. Host test PASS. Build wiring: -DDAQ_MTP_USB=ON (cmake_extra_args) adds mtp_usb/ (fork + carrier), daq_mtp.defaults, dependencies.lock.daq_mtp.
+* CRITICAL FINDING (MTP-M-4): in the spike and first daq_mtp build the fork's strong tud_mtp_*_cb callbacks were NOT linked (weak defaults return -1; mtp_dispatch absent) -> every MTP command failed. Very likely the real cause of "failed to open session". Fixed in the merged fork with a link anchor in tinyusb_mtp_install_driver(). CHECK EVERY BUILD: `nm -C firmware.elf | grep tud_mtp_` must show T.
+* New: src/usb_files.c (grace window, usj_pads_restore, CDC console via cio_set_backend, log ring, DL/REBOOT/LEAVE/LOG/HANG handled in the USB layer), src/mtp_vfs.c (read-only VFS: NAND + SD folders, refresh at OpenSession only).
+* Untested on hardware: everything. Hardware order MTP-M-7: flash daq_mtp_force (human with BOOT), power-cycle grace, INFO/LOG, DL+reflash, REBOOT, LEAVE, ptp_probe -s1..3 (stages 4-6 need a rewrite for real files), mtp-detect last.
+* TODO non-hardware: ptp_probe stages 4-6 for real files; remove the 4.9 MB duplicate fork copy (spike's) or document; P3 not merged (stale device after WDT reset: replug).
+* Agent tokens since 00:00: ~2.2M.
