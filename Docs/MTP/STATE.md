@@ -52,3 +52,8 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * Next (window B): (1) spike host tests, REBOOT then DL first. (2) Merge the spike fork + CDC into the daq_mtp build: strong
   files_mode_usb_start(), cio_set_backend(CDC), mtp_store backends behind the VFS shim. (3) Test on Linux with the board, read-only.
   (4) Deviation Log, README. (5) Final summary at 10:45.
+
+## 01:35 Haiku (low) report, commit 164a590
+* `daq_mtp` builds; `files_mode_usb_start` is W (weak default) in the ELF. The weak->strong override test (MTP-B-6) is still TODO: do it when the USB code adds the strong symbol.
+* tools/mtp_store_test.sh PASS (blocked NAND 3, NOR 1). Deviation Log.md created. README MODE2 line updated.
+* 01:27 running: sonnet spike TEST agent (REBOOT/DL first, then libmtp, GetPartialObject, speed, write refusal, CDC alongside MTP).
