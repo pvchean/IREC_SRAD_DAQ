@@ -163,3 +163,10 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * NAND: user approved a 30 s daq_sim recording: 173 pages (~2.8 Mbit, 0.6 % of 500 Mbit). The NAND now holds ONE synthetic file (id 2). All other NAND use: reads.
 * NOT tested: HANG (crash recovery, risk V-1), SD card (none), Windows, macOS, desktop file manager, long transfers, MATLAB over CDC while MTP runs. LEAVE forbidden.
 * Next (optional): HANG test with the user present; gvfs/file-manager test; stress read (full file 20x); Windows/macOS need other machines.
+
+## 09:0x Soak/concurrency agent (~120k tokens, commit d532821; Hardware_Report.md MTP-HW-6)
+* 30/30 probe stage-5 runs PASS, 5/5 mtp-getfile CRC f3d49e4f, 714-718 KB/s, INFO clean (blocked_writes=0) after each. 225/225 CDC INFO answered during MTP reads, no speed change.
+* DIAG: heap_free 56692 min 49524; stack free TinyUSB 5540, mtp_vfs 5884, cmd 6304, main 1376 (lowest), led 2120. Earlier "missing DIAG" was a short reader: read until END.
+* File manager (KDE/gvfs) not testable: gvfs-mtp/jmtpfs not installed; Solid shows "Camera" (udev ID_MTP_DEVICE missing); a replug may fix. Not a firmware proof either way.
+* Open: file manager, Windows, macOS, HANG (crash recovery), SD card, lower the MTP trace level for release (log ring fills).
+* Window B agent tokens so far: ~1.9M (host 386k, opus 225k, hw 65k, soak 120k, + orchestrator).
