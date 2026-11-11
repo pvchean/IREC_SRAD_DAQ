@@ -130,3 +130,14 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * Cannot show: real libmtp/Windows/macOS, DWC2/DMA, USB task timing/stack (6144 B estimate), real SD, usb_files.c/boot code. Highest-risk change on a real host: GetObjectHandles root fix.
 * daq_mtp_force builds clean; nm shows T for 6 tud_mtp_*_cb and mtp_dispatch.
 * Window B agent tokens so far: ~450k (window A total ~2.6M).
+
+## 07:0x OPUS REVIEW of the USB boot code (~190k tokens, commit fcbb2d1; Review_UsbFiles.md MTP-V-1..13). Verdict: daq_mtp_force safe to flash.
+* Every boot path keeps USB-Serial-JTAG alive until TinyUSB starts; a full power cycle always gives the 10 s grace.
+* Fixed/changed (marked `REVIEW (MTP-V)`, Deviation Log rows): SD store race between cmd task and USB task; refresh freed fd slots; TinyUSB task stack 6144 -> 8192; LOG ends with a DIAG line (heap, stack); failed CDC init drops D+ and restarts.
+  Builds clean, nm shows T for tud_mtp_*_cb, host test 8427/8427.
+* OPEN RISKS: V-1 (HIGH): after panic/WDT reset in files mode D+ stays up -> stale 4041 device; probably recovers ~10 s later (HANG test must confirm); crash hook fix is written in MTP-V-1.3, NOT applied (needs hardware proof).
+  V-3: OpenSession refresh blocks the USB task up to 10 s (30 s max): EP0/CDC dead meanwhile. V-4: stacks unmeasured (read the DIAG line). V-12: HANG ships in the image.
+* **HARD RULE (MTP-V-2): do NOT test `LEAVE`.** LEAVE boots daq_mtp SERIAL mode: read-write PFS mount, can erase NAND, starts pfs_writer, SD logger, WiFi.
+  The hardware agent must SKIP step MTP-M-7.5 (LEAVE). Use REBOOT (back to files mode) and DL only. Only test LEAVE with the user's permission.
+* Windows: no MS OS/BOS descriptor needed (unverified on a real PC). macOS: ptpcamerad grabs the interface; stop it before OpenMTP.
+* Window B agent tokens so far: ~0.85M (host harness 386k, opus review 190k + orchestrator).
