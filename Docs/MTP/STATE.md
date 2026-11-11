@@ -170,3 +170,9 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * File manager (KDE/gvfs) not testable: gvfs-mtp/jmtpfs not installed; Solid shows "Camera" (udev ID_MTP_DEVICE missing); a replug may fix. Not a firmware proof either way.
 * Open: file manager, Windows, macOS, HANG (crash recovery), SD card, lower the MTP trace level for release (log ring fills).
 * Window B agent tokens so far: ~1.9M (host 386k, opus 225k, hw 65k, soak 120k, + orchestrator).
+
+## 09:0x Polish + user guide (~110k tokens; commits 333c862, 935414a)
+* Main stack +2 KB (5632 B), tinyusb_mtp_* log tags at WARN, HANG only in env daq_mtp_force (USB_FILES_TEST_CMDS; closes MTP-V-12). daq_mtp_force/daq_mtp/daq build clean, nm T x6 in both mtp envs, host test 8427/8427. NOT flashed: the board still runs the pre-polish build.
+* Docs/MTP/User_Guide.md (99 lines). NAND file names are NAND_F<5 decimal digits>D<device>.BIN (not hex). UNVERIFIED: MATLAB apps find the board in files mode (they look for "DAQBOARD V1" on PING), LED behaviour.
+* Next: flash the polished daq_mtp_force via DL (proven path), re-run probe 1-6 and read DIAG main=.
+* Window B agent tokens so far: ~2.0M.
