@@ -30,3 +30,14 @@ Build: use ~/.platformio/penv/bin/pio (system pio lacks intelhex). Keep NAND_/uS
 ## Checkpoint 00:3x (window A ended early: user reported 5 % left; orchestrator had no usage meter and was late)
 Agents told to pause and write Spike_Report.md / Boot_Integration.md. Window A total agent tokens ~ 480k + spike/integration (unknown, see their reports).
 Resume: a session cron fires at 06:23 and starts fresh agents from these files. It lives only while the VS Code session stays open.
+
+## Spike agent report (00:4x, ~170k tokens, commits 84fe009, 4fccca6)
+* The board did NOT run the DAQ firmware. It ran a PFS-PIL test firmware ("@L:I:PFS-PIL READY 64 16 2048"). The spike overwrote
+  bootloader, partition table and app only (pfs_nor and NAND untouched). That old firmware is gone; the user should know.
+* Board now runs the SPIKE firmware (serial mode, MODE2 reads HIGH, recoverable with penv pio upload, no BOOT button).
+  DECISION: leave the spike firmware on the board. Do NOT flash `-e daq` (auto-record at boot if MODE1 high = NAND writes).
+* esp_tinyusb 3.0.0 builds on IDF 6.1 / platform 7.1.3. `override_path` fork works (do not name the folder `components/`).
+  Fork: plain VFS as storage; read-only; write ops return 0x200E/0x200F. NOT host-tested yet.
+* Untested and critical: lsusb, libmtp, GetPartialObject, speed, CDC `DL` and `REBOOT` (the way back from files mode).
+* Next: Spike_Report.md MTP-P-7: flash `spike_force`, wait 10 s grace, lsusb -v; test REBOOT, then DL, before anything else.
+* Ledger: window A agent tokens total ~ 190k+190k+280k+170k = ~830k (integration agent still unreported).
