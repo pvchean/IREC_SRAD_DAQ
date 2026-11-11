@@ -108,3 +108,12 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * Untested on hardware: everything. Hardware order MTP-M-7: flash daq_mtp_force (human with BOOT), power-cycle grace, INFO/LOG, DL+reflash, REBOOT, LEAVE, ptp_probe -s1..3 (stages 4-6 need a rewrite for real files), mtp-detect last.
 * TODO non-hardware: ptp_probe stages 4-6 for real files; remove the 4.9 MB duplicate fork copy (spike's) or document; P3 not merged (stale device after WDT reset: replug).
 * Agent tokens since 00:00: ~2.2M.
+
+## 03:2x ptp_probe generalised (haiku-class task, commit d1f0be7): real-file stages 3-6 + --fake mode. Compiles; untested on hardware.
+## STATUS: ALL NON-HARDWARE WORK IS DONE. WAITING FOR THE BOARD.
+* Heartbeat rule: run `lsusb | grep 303a`. If NO 303a device: do nothing (no agents, no tokens), end the turn.
+* If 303a:1001 appears: it may be ROM download mode (human held BOOT) or the grace window. Start ONE fresh sonnet HARDWARE agent that follows
+  Merge_Report.md MTP-M-7 / Spike_Report.md MTP-P-11.7 strictly: flash `daq_mtp_force` (penv pio, `-e daq_mtp_force -t upload`), power-cycle proof, INFO/LOG,
+  DL+reflash, REBOOT, LEAVE, then ptp_probe -s 1..6, mtp-detect only last. STOP at the first anomaly (Board-safety rules). Check `nm -C firmware.elf | grep tud_mtp_` shows T.
+* If 303a:4041 appears (board running old spike v1/v3?) read Spike_Report.md to see which firmware; do not run mtp-detect.
+* Zero NAND writes. Agent tokens since 00:00: ~2.6M.
