@@ -18,6 +18,7 @@
 #include "nvs.h"
 
 #include "cal.h"
+#include "io.h"
 #include "stream.h"
 #define TP_CRC32(p, n) esp_rom_crc32_le(0, (p), (n))
 #include "telem_frame.h"
@@ -25,7 +26,8 @@
 #define NVS_NS        "daq"
 #define NVS_KEY       "telem"
 #define CFG_MAGIC     0x7E1E0001U
-#define RING_RECS     8192U                 /* power of 2: 64 KB in the PSRAM, about 1 minute at 120 records per second */
+#define RING_RECS     16384U                /* power of 2: 144 KB in the PSRAM, about 1 minute at 240 records per second (two DAQs) */
+#define NDEV          8U                    /* device IDs 0..7 (ADDR2..ADDR0) */
 #define BATCH_RECS    250U                  /* records per frame: 2000 bytes, below TP_MAX_UPLOAD */
 #define SEND_MS       500                   /* the upload DAQ sends the data of the last 500 ms in one frame per sensor */
 #define STATUS_MS     2000
@@ -50,14 +52,24 @@ volatile uint8_t telem_run_mode;
 
 static cfg_t s_cfg;                         /* the saved settings (the commands change them) */
 static cfg_t s_run;                         /* the settings of this boot */
-static uint16_t s_cnt_pt, s_cnt_lc;         /* decimation counters: only the sink uses them, under its lock */
-
-/* the ring of the UPLOAD DAQ: the sink writes (one writer), the task reads. A full ring drops the oldest record. */
-static record_t *s_ring;
+/* the ring of the UPLOAD DAQ. The writers are the sink (own sensors, core 1) and the two chain receive tasks (other boards, core 0),
+   so the write, the decimation counters and the calibration blocks are all under s_rmux. The task reads. A full ring drops the oldest record. */
+typedef struct __attribute__((packed)) { record_t r; uint8_t dev; } ring_rec_t;
+static ring_rec_t *s_ring;
 static uint32_t s_rhead, s_rtail;
+static uint16_t s_cnt[NDEV][2];             /* decimation counters of each device: [0] PT, [1] load cell */
 static portMUX_TYPE s_rmux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_local_data;                   /* the own sensors gave a sample: this board is a data source too */
 
-typedef struct { record_t pt[BATCH_RECS], lc[BATCH_RECS]; unsigned npt, nlc; uint8_t out[2U * (TP_HDR + BATCH_RECS * TP_REC_SIZE + TP_CRC) + 64U]; } up_t;
+/* The last calibration block that the chain gave for each other board. ver counts the blocks that came. */
+typedef struct { record_t b[CAL_BLOCK_RECS]; uint32_t ver; bool valid; } rcal_t;
+static rcal_t s_rcal[NDEV];
+
+typedef struct {
+    record_t pt[NDEV][BATCH_RECS], lc[NDEV][BATCH_RECS];     /* the batch of each device and sensor */
+    unsigned npt[NDEV], nlc[NDEV];
+    uint8_t out[TP_HDR + BATCH_RECS * TP_REC_SIZE + TP_CRC + 64U];
+} up_t;
 static up_t *s_up;                           /* in the PSRAM, only in UPLOAD mode: OFF mode keeps no RAM for it */
 
 static volatile uint32_t s_drops, s_sent_frames, s_reconnects;
@@ -108,7 +120,7 @@ void telem_init(void)
         return;
     }
     if (s_run.mode == TELEM_UPLOAD) {
-        s_ring = heap_caps_malloc(RING_RECS * sizeof(record_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_ring = heap_caps_malloc(RING_RECS * sizeof(ring_rec_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         s_up = heap_caps_malloc(sizeof *s_up, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s_ring || !s_up) { ESP_LOGE(TAG, "no memory for the ring: telemetry stays off"); return; }
     }
@@ -178,20 +190,53 @@ bool telem_link_up(void) { return s_link_up; }
 
 /* ---------------------------------------------------------------- UPLOAD: the ring */
 
-/* Called from the sink under its lock, so one writer. The short critical section copies 8 bytes. */
-void telem_push_slow(const record_t *r)
+/* One record into the ring: every Nth of each device and sensor. The short critical section copies 9 bytes. */
+static void ring_add(uint8_t dev, const record_t *r)
 {
     if (rec_is_meta(r)) { return; }                             /* the task makes its own calibration frames */
-    if (rec_is_lc(r)) { if (++s_cnt_lc < s_run.decim_lc) { return; } s_cnt_lc = 0; }
-    else              { if (++s_cnt_pt < s_run.decim_pt) { return; } s_cnt_pt = 0; }
+    unsigned k = rec_is_lc(r) ? 1U : 0U;
+    uint16_t every = k ? s_run.decim_lc : s_run.decim_pt;
+    dev &= (NDEV - 1U);
     portENTER_CRITICAL(&s_rmux);
-    if (s_rhead - s_rtail >= RING_RECS) { s_rtail++; s_drops++; }      /* full: the oldest record goes */
-    s_ring[s_rhead & (RING_RECS - 1U)] = *r;
-    s_rhead++;
+    if (++s_cnt[dev][k] >= every) {
+        s_cnt[dev][k] = 0;
+        if (s_rhead - s_rtail >= RING_RECS) { s_rtail++; s_drops++; }      /* full: the oldest record goes */
+        s_ring[s_rhead & (RING_RECS - 1U)].r = *r;
+        s_ring[s_rhead & (RING_RECS - 1U)].dev = dev;
+        s_rhead++;
+    }
     portEXIT_CRITICAL(&s_rmux);
 }
 
-static unsigned ring_pop(record_t *out, unsigned max)
+/* The own sensors: called from the sink under its lock. */
+void telem_push_slow(const record_t *r)
+{
+    s_local_data = true;
+    ring_add(io_addr(), r);
+}
+
+/* Another board: records of a chain packet (called by the chain receive tasks). */
+void telem_push_remote_slow(uint8_t dev, const uint8_t *recs, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++) {
+        record_t r;
+        memcpy(&r, recs + i * sizeof r, sizeof r);
+        ring_add(dev, &r);
+    }
+}
+
+void telem_push_remote_cal_slow(uint8_t dev, const uint8_t *recs, unsigned n)
+{
+    if (n != CAL_BLOCK_RECS) { return; }
+    dev &= (NDEV - 1U);
+    portENTER_CRITICAL(&s_rmux);
+    memcpy(s_rcal[dev].b, recs, sizeof s_rcal[dev].b);
+    s_rcal[dev].ver++;
+    s_rcal[dev].valid = true;
+    portEXIT_CRITICAL(&s_rmux);
+}
+
+static unsigned ring_pop(ring_rec_t *out, unsigned max)
 {
     unsigned n;
     portENTER_CRITICAL(&s_rmux);
@@ -357,51 +402,77 @@ static void update_rssi(void)
 /* ---------------------------------------------------------------- UPLOAD task */
 
 
-static bool up_send_batches(int fd, uint8_t src)
+/* One frame for each device and sensor that has records. Each frame has the device ID of the board that made the data. */
+static bool up_send_batches(int fd)
 {
-    size_t n = 0;
-    if (s_up->npt) { n += tp_make_frame(s_up->out + n, src, TP_DATA_PT, s_up->pt, s_up->npt * sizeof(record_t)); }
-    if (s_up->nlc) { n += tp_make_frame(s_up->out + n, src, TP_DATA_LC, s_up->lc, s_up->nlc * sizeof(record_t)); }
-    s_up->npt = s_up->nlc = 0;
-    if (!n) { return true; }
-    s_sent_frames++;
-    return send_all(fd, s_up->out, n);
+    for (unsigned d = 0; d < NDEV; d++) {
+        for (int k = 0; k < 2; k++) {
+            unsigned *cnt = k ? &s_up->nlc[d] : &s_up->npt[d];
+            if (!*cnt) { continue; }
+            size_t n = tp_make_frame(s_up->out, (uint8_t)d, k ? TP_DATA_LC : TP_DATA_PT, k ? (const void *)s_up->lc[d] : (const void *)s_up->pt[d],
+                                     *cnt * sizeof(record_t));
+            *cnt = 0;
+            s_sent_frames++;
+            if (!send_all(fd, s_up->out, n)) { return false; }
+        }
+    }
+    return true;
 }
 
-static void upload_session(int fd, uint8_t src)
+static void up_clear(void)
 {
+    memset(s_up->npt, 0, sizeof s_up->npt);
+    memset(s_up->nlc, 0, sizeof s_up->nlc);
+}
+
+static void upload_session(int fd)
+{
+    const uint8_t self = (uint8_t)(io_addr() & (NDEV - 1U));
     int64_t last_send = esp_timer_get_time(), last_status = 0, last_cal = 0;
-    uint32_t cal_rev = 0xFFFFFFFFU;
-    record_t tmp[16];
+    uint32_t cal_rev = 0xFFFFFFFFU, rcal_sent[NDEV];
+    ring_rec_t tmp[16];
+    for (unsigned d = 0; d < NDEV; d++) { rcal_sent[d] = 0xFFFFFFFFU; }
     for (;;) {
         unsigned n;
         do {                                                    /* the ring into the batches */
             n = ring_pop(tmp, 16);
             for (unsigned i = 0; i < n; i++) {
-                if (rec_is_lc(&tmp[i])) {
-                    if (s_up->nlc == BATCH_RECS && !up_send_batches(fd, src)) { return; }
-                    s_up->lc[s_up->nlc++] = tmp[i];
+                unsigned d = tmp[i].dev & (NDEV - 1U);
+                if (rec_is_lc(&tmp[i].r)) {
+                    if (s_up->nlc[d] == BATCH_RECS && !up_send_batches(fd)) { return; }
+                    s_up->lc[d][s_up->nlc[d]++] = tmp[i].r;
                 } else {
-                    if (s_up->npt == BATCH_RECS && !up_send_batches(fd, src)) { return; }
-                    s_up->pt[s_up->npt++] = tmp[i];
+                    if (s_up->npt[d] == BATCH_RECS && !up_send_batches(fd)) { return; }
+                    s_up->pt[d][s_up->npt[d]++] = tmp[i].r;
                 }
             }
         } while (n == 16);
 
         int64_t now = esp_timer_get_time();
         if (now - last_send >= (int64_t)SEND_MS * 1000) {
-            if (!up_send_batches(fd, src)) { return; }
+            if (!up_send_batches(fd)) { return; }
             last_send = now;
         }
         cal_t c;
         cal_get(&c);
-        if (c.rev != cal_rev || now - last_cal >= (int64_t)CAL_MS * 1000) {      /* the calibration: at the start, when it changes, every 30 s */
+        if (s_local_data && (c.rev != cal_rev || now - last_cal >= (int64_t)CAL_MS * 1000)) {   /* own calibration: at the start, when it changes, every 30 s */
             record_t b[CAL_BLOCK_RECS];
             cal_make_block(b);
-            size_t m = tp_make_frame(s_up->out, src, TP_CAL, b, sizeof b);
+            size_t m = tp_make_frame(s_up->out, self, TP_CAL, b, sizeof b);
             if (!send_all(fd, s_up->out, m)) { return; }
             cal_rev = c.rev;
             last_cal = now;
+        }
+        for (unsigned d = 0; d < NDEV; d++) {                   /* the calibration blocks of the other boards: each time one comes (they repeat every 30 s) */
+            record_t b[CAL_BLOCK_RECS];
+            bool send = false;
+            portENTER_CRITICAL(&s_rmux);
+            if (s_rcal[d].valid && s_rcal[d].ver != rcal_sent[d]) { memcpy(b, s_rcal[d].b, sizeof b); rcal_sent[d] = s_rcal[d].ver; send = true; }
+            portEXIT_CRITICAL(&s_rmux);
+            if (send) {
+                size_t m = tp_make_frame(s_up->out, (uint8_t)d, TP_CAL, b, sizeof b);
+                if (!send_all(fd, s_up->out, m)) { return; }
+            }
         }
         if (now - last_status >= (int64_t)STATUS_MS * 1000) {
             tp_status_t st;
@@ -412,7 +483,7 @@ static void upload_session(int fd, uint8_t src)
             st.queue = ring_count();
             st.uptime_s = (uint32_t)(now / 1000000);
             st.reconnects = (uint16_t)s_reconnects;
-            size_t m = tp_make_frame(s_up->out, src, TP_STATUS, &st, sizeof st);
+            size_t m = tp_make_frame(s_up->out, self, TP_STATUS, &st, sizeof st);
             if (!send_all(fd, s_up->out, m)) { return; }
             last_status = now;
         }
@@ -437,11 +508,11 @@ static void upload_task(void *arg)
             if (s_had_link) { s_reconnects++; }
             s_had_link = true;
             ring_flush();                                       /* only the present: old data waits in the NAND and SD files */
-            s_up->npt = s_up->nlc = 0;
+            up_clear();
             s_link_up = true;
             ESP_LOGI(TAG, "upload link up");
             set_timeouts(fd, 100, 3000);
-            upload_session(fd, 0);
+            upload_session(fd);
             s_link_up = false;
             ESP_LOGW(TAG, "upload link down");
         }

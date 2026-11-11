@@ -2,8 +2,12 @@
    One TCP port, one thread, poll(). No libraries. Settings come from the environment:
      TELEM_PORT     TCP port (default 48613)
      TELEM_TOKEN    shared token, 16 characters at most (default "changeme", and the server warns)
-     TELEM_DATA_DIR folder for the archive file (default /data). Empty = no archive.
-     TELEM_RING_MB  size of the frame ring in memory (default 64) */
+     TELEM_DATA_DIR folder for the archive files (default /data). Empty = no archive.
+                    One file for all frames (archive_<time>.tlm) and one file for each DAQ that sends data
+                    (archive_<time>_dev<N>.tlm, N = the src_dev of the frames).
+     TELEM_RING_MB  size of the frame ring in memory (default 64)
+   A download client can send RESET: the server closes the archive files (they stay on the disk), starts new files and
+   empties the ring (the old data is no longer given to viewers; the frame index continues). */
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -21,6 +25,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <deque>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -64,14 +69,24 @@ struct Client {
 struct Stats {
     uint64_t frames = 0, rec_pt = 0, rec_lc = 0, bytes_in = 0, bytes_out = 0, bad_crc = 0, uploads = 0, downloads = 0;
     int64_t last_upload_rx = 0;
+};
+
+/* What the server knows about each DAQ that sends data (the src_dev of its frames). */
+struct Dev {
+    uint64_t frames = 0, rec_pt = 0, rec_lc = 0;
+    int64_t last_rx = 0;
     bool have_status = false;
     tp_status_t status{};
+    std::vector<uint8_t> last_cal;      /* the last CAL frame of this DAQ */
+    FILE *archive = nullptr;
 };
 
 std::deque<Entry> g_ring;
 size_t g_ring_bytes = 0, g_ring_cap = 64U << 20;
 uint64_t g_head = 0;                    /* the index of the next frame */
-std::vector<uint8_t> g_last_cal;
+std::map<uint8_t, Dev> g_dev;           /* by src_dev */
+std::string g_dir, g_stamp;             /* archive folder, and the start time in the file names */
+const size_t MAX_DEV_FILES = 16;        /* a junk src_dev cannot open more files than this */
 std::vector<Client> g_clients;
 Stats g_st;
 FILE *g_archive = nullptr;
@@ -112,13 +127,53 @@ void send_nak(Client &c, uint8_t why)
 
 void store(const uint8_t *frame, size_t n, uint8_t type, const uint8_t *pay, size_t len)
 {
+    const uint8_t src = frame[3];
+    Dev &d = g_dev[src];
+    d.frames++;
+    d.last_rx = now_ms();
+    if (type == TP_DATA_PT) { d.rec_pt += len / TP_REC_SIZE; }
+    if (type == TP_DATA_LC) { d.rec_lc += len / TP_REC_SIZE; }
+    if (!d.archive && !g_dir.empty()) {
+        size_t open = 0;
+        for (const auto &kv : g_dev) { if (kv.second.archive) { open++; } }
+        if (open < MAX_DEV_FILES) {
+            std::string name = g_dir + "/archive_" + g_stamp + "_dev" + std::to_string(src) + ".tlm";
+            d.archive = std::fopen(name.c_str(), "wb");
+            if (d.archive) { log_line("DAQ %u: first data, archive %s", (unsigned)src, name.c_str()); }
+            else { log_line("WARNING: cannot open %s", name.c_str()); }
+        }
+    }
+    if (d.archive) { std::fwrite(frame, 1, n, d.archive); }
     Entry e{ g_head++, std::vector<uint8_t>(frame, frame + n), now_ms() };
     g_ring_bytes += n;
     g_ring.push_back(std::move(e));
     while (g_ring_bytes > g_ring_cap && g_ring.size() > 1) { g_ring_bytes -= g_ring.front().frame.size(); g_ring.pop_front(); }
-    if (type == TP_CAL) { g_last_cal.assign(frame, frame + n); }
-    if (type == TP_STATUS && len >= sizeof(tp_status_t)) { std::memcpy(&g_st.status, pay, sizeof g_st.status); g_st.have_status = true; }
+    if (type == TP_CAL) { d.last_cal.assign(frame, frame + n); }
+    if (type == TP_STATUS && len >= sizeof(tp_status_t)) { std::memcpy(&d.status, pay, sizeof d.status); d.have_status = true; }
     if (g_archive) { std::fwrite(frame, 1, n, g_archive); }
+}
+
+/* Close the archive files and start new ones with the time of now in the name. The file of each DAQ opens at its first frame.
+   A second start in the same second gets "_2", "_3" ... so that no file is written over. */
+void open_archives()
+{
+    if (g_archive) { std::fclose(g_archive); g_archive = nullptr; }
+    for (auto &kv : g_dev) { if (kv.second.archive) { std::fclose(kv.second.archive); kv.second.archive = nullptr; } }
+    if (g_dir.empty()) { return; }
+    char stamp[32];
+    std::time_t t = std::time(nullptr);
+    std::strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", std::gmtime(&t));
+    g_stamp = stamp;
+    for (int i = 2; i < 1000; i++) {
+        FILE *f = std::fopen((g_dir + "/archive_" + g_stamp + ".tlm").c_str(), "rb");
+        if (!f) { break; }
+        std::fclose(f);
+        g_stamp = std::string(stamp) + "_" + std::to_string(i);
+    }
+    std::string name = g_dir + "/archive_" + g_stamp + ".tlm";
+    g_archive = std::fopen(name.c_str(), "wb");
+    if (!g_archive) { log_line("WARNING: cannot open the archive file in %s: no archive", g_dir.c_str()); }
+    else { log_line("archive: %s (all frames), and one file for each DAQ that sends data", name.c_str()); }
 }
 
 /* Answer a GET: whole stored frames from the cursor on. */
@@ -131,7 +186,10 @@ void reply_batch(Client &c)
     tp::put64(pay, 0);                                  /* next cursor, filled below */
     tp::put32(pay, age < 0 ? TP_AGE_NONE : (uint32_t)std::min<int64_t>(age, 0xFFFFFFF0LL));
     if (c.want_cal) {
-        if (!g_last_cal.empty() && g_last_cal.size() <= c.max_bytes) { pay.insert(pay.end(), g_last_cal.begin(), g_last_cal.end()); }
+        for (const auto &kv : g_dev) {                  /* the last CAL of each DAQ, as many as fit */
+            const std::vector<uint8_t> &cal = kv.second.last_cal;
+            if (!cal.empty() && pay.size() + cal.size() <= c.max_bytes + 12U) { pay.insert(pay.end(), cal.begin(), cal.end()); }
+        }
         c.want_cal = false;
     }
     if (start < g_head && !g_ring.empty()) {
@@ -180,6 +238,18 @@ void handle_frame(Client &c, const tp::View &v, const uint8_t *frame, size_t n)
         store(frame, n, v.type, v.pay, v.len);
         g_st.last_upload_rx = now_ms();
     } else {                                            /* DOWNLOAD */
+        if (v.type == TP_RESET && v.len == 0) {
+            open_archives();
+            g_ring.clear();
+            g_ring_bytes = 0;
+            log_line("%s: RESET: ring emptied (head=%llu), new archive files", c.peer.c_str(), (unsigned long long)g_head);
+            std::vector<uint8_t> a;
+            tp::put64(a, g_head);
+            std::string nm = g_dir.empty() ? std::string() : "archive_" + g_stamp + ".tlm";
+            a.insert(a.end(), nm.begin(), nm.end());
+            queue_tx(c, tp::build(0, TP_RESET, a.data(), a.size()));
+            return;
+        }
         if (v.type != TP_GET || v.len != sizeof(tp_get_t)) { send_nak(c, TP_NAK_FRAME); return; }
         tp_get_t g;
         std::memcpy(&g, v.pay, sizeof g);
@@ -221,10 +291,16 @@ void print_stats()
     int up = 0, down = 0;
     for (const Client &c : g_clients) { if (c.authed && c.role == TP_ROLE_UPLOAD) { up++; } else if (c.authed) { down++; } }
     int64_t age = g_st.last_upload_rx ? now_ms() - g_st.last_upload_rx : -1;
-    log_line("up=%d down=%d frames=%llu pt=%llu lc=%llu in=%lluB out=%lluB badcrc=%llu last_rx_age=%lldms ring=%zu rssi=%d drops=%u",
+    log_line("up=%d down=%d frames=%llu pt=%llu lc=%llu in=%lluB out=%lluB badcrc=%llu last_rx_age=%lldms ring=%zu",
              up, down, (unsigned long long)g_st.frames, (unsigned long long)g_st.rec_pt, (unsigned long long)g_st.rec_lc,
              (unsigned long long)g_st.bytes_in, (unsigned long long)g_st.bytes_out, (unsigned long long)g_st.bad_crc,
-             (long long)age, g_ring.size(), g_st.have_status ? g_st.status.rssi : 0, g_st.have_status ? (unsigned)g_st.status.drops : 0U);
+             (long long)age, g_ring.size());
+    for (const auto &kv : g_dev) {
+        const Dev &d = kv.second;
+        log_line("  DAQ %u: frames=%llu pt=%llu lc=%llu last_rx_age=%lldms rssi=%d drops=%u", (unsigned)kv.first,
+                 (unsigned long long)d.frames, (unsigned long long)d.rec_pt, (unsigned long long)d.rec_lc,
+                 (long long)(now_ms() - d.last_rx), d.have_status ? d.status.rssi : 0, d.have_status ? (unsigned)d.status.drops : 0U);
+    }
 }
 
 int make_listener(int port)
@@ -273,6 +349,7 @@ int main()
     int port = std::atoi(env_or("TELEM_PORT", "48613").c_str());
     std::string token = env_or("TELEM_TOKEN", "changeme");
     std::string dir = env_or("TELEM_DATA_DIR", "/data");
+    g_dir = dir;
     g_ring_cap = (size_t)std::max(1, std::atoi(env_or("TELEM_RING_MB", "64").c_str())) << 20;
     std::memset(g_token, 0, sizeof g_token);
     std::memcpy(g_token, token.data(), std::min<size_t>(token.size(), TP_TOKEN_LEN));
@@ -282,14 +359,7 @@ int main()
     ::signal(SIGTERM, on_signal);
     ::signal(SIGPIPE, SIG_IGN);
 
-    if (!dir.empty()) {
-        char name[64];
-        std::time_t t = std::time(nullptr);
-        std::strftime(name, sizeof name, "/archive_%Y%m%d_%H%M%S.tlm", std::gmtime(&t));
-        g_archive = std::fopen((dir + name).c_str(), "wb");
-        if (!g_archive) { log_line("WARNING: cannot open the archive file in %s: no archive", dir.c_str()); }
-        else { log_line("archive: %s%s", dir.c_str(), name); }
-    }
+    open_archives();
 
     int lfd = make_listener(port);
     if (lfd < 0) { log_line("ERROR: cannot listen on port %d", port); return 1; }
@@ -340,10 +410,15 @@ int main()
                 g_clients.erase(g_clients.begin() + (long)i);
             } else { i++; }
         }
-        if (now - last_flush >= 1000) { if (g_archive) { std::fflush(g_archive); } last_flush = now; }
+        if (now - last_flush >= 1000) {
+            if (g_archive) { std::fflush(g_archive); }
+            for (auto &kv : g_dev) { if (kv.second.archive) { std::fflush(kv.second.archive); } }
+            last_flush = now;
+        }
         if (now - last_stats >= 10000) { print_stats(); last_stats = now; }
     }
     log_line("stop");
     if (g_archive) { std::fclose(g_archive); }
+    for (auto &kv : g_dev) { if (kv.second.archive) { std::fclose(kv.second.archive); } }
     return 0;
 }

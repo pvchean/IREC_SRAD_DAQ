@@ -31,6 +31,8 @@
 #define TP_GET          7U              /* download. payload: cursor u64, max_bytes u16, wait_ms u16 (tp_get_t) */
 #define TP_BATCH        8U              /* server -> download client. payload: next_cursor u64, age_ms u32, then whole stored frames */
 #define TP_NAK          9U              /* server -> client. payload: reason u8. The server closes the connection after it. */
+#define TP_RESET        10U             /* download -> server, no payload: close the archive files, start new ones, empty the ring.
+                                           server -> download: head cursor u64, then the name of the new archive file (text). */
 
 #define TP_ROLE_UPLOAD    1U
 #define TP_ROLE_DOWNLOAD  2U

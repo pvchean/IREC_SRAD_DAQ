@@ -12,7 +12,8 @@ RC=$?
 kill $PID 2>/dev/null
 wait $PID 2>/dev/null
 if [ $RC -ne 0 ]; then echo "--- server log ---"; cat "$DIR/server.log"; fi
-# The archive must hold the 8 good frames only (1272 bytes): the bad-CRC frame and the junk bytes are not stored.
+# The archives must hold the good frames only: the bad-CRC frame and the junk bytes are not stored. archive_<time>.tlm holds all frames;
+# the _dev<N> files hold one DAQ each, and their sizes add up to the size of the first file.
 ls -l "$DIR"/archive_*.tlm
 rm -rf "$DIR"
 exit $RC

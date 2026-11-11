@@ -2,7 +2,8 @@
 
    The same firmware runs on all DAQs. The WiFi mode is stored in the flash (NVS) and read once at boot:
      OFF       (default) No WiFi code runs. No radio, no task, no buffer. telem_push() is one test of a variable.
-     UPLOAD    The DAQ near the rocket. It keeps every Nth sample of each sensor and sends them to the server in batches.
+     UPLOAD    The DAQ with the WiFi link. It keeps every Nth sample of each sensor, of its own sensors and of every other DAQ in the
+               chain, and sends them to the server in batches. It can have no sensors.
      DOWNLOAD  The DAQ in the bunker. It asks the server for the data and prints it on the USB live stream, in the
                format of stream.c. It does not print its own sensors.
    A new mode starts after the next reboot. There is no switch while the DAQ runs.
@@ -42,6 +43,20 @@ void telem_push_slow(const record_t *r);
 static inline void telem_push(const record_t *r)
 {
     if (telem_run_mode == TELEM_UPLOAD) { telem_push_slow(r); }
+}
+
+/* The chain gives the records of the other boards to the UPLOAD DAQ (chain.c). The upload frames keep the device ID of the board
+   that made the data (src_dev), so a viewer and the server separate the DAQs. recs = n records of record_t, pay of a chain packet.
+   A calibration block (n = 6) is kept for each device and sent to the server when a new one comes. */
+void telem_push_remote_slow(uint8_t dev, const uint8_t *recs, unsigned n);
+void telem_push_remote_cal_slow(uint8_t dev, const uint8_t *recs, unsigned n);
+static inline void telem_push_remote(uint8_t dev, const uint8_t *recs, unsigned n)
+{
+    if (telem_run_mode == TELEM_UPLOAD) { telem_push_remote_slow(dev, recs, n); }
+}
+static inline void telem_push_remote_cal(uint8_t dev, const uint8_t *recs, unsigned n)
+{
+    if (telem_run_mode == TELEM_UPLOAD) { telem_push_remote_cal_slow(dev, recs, n); }
 }
 
 /* DOWNLOAD DAQ: the own sensors give no live output (they read zero). */

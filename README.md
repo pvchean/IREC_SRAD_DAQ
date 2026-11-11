@@ -228,7 +228,8 @@ Live view:
 
 ## Live telemetry over WiFi
 For the static fire, nobody can be near the rocket. A DAQ near the rocket sends decimated data over WiFi (a phone hotspot) to a
-server on the internet. A DAQ in the safety bunker gets the data from the server and prints it on USB. The server is in `server/`
+server on the internet. In the safety bunker, the MATLAB app `DAQ_Live_Monitor` gets the data from the server directly over TCP (the PC
+must have internet). As an alternative, a DAQ in the bunker gets the data and prints it on USB for the app. The server is in `server/`
 (C++, Docker, see `server/README.md`). The frame format is in `server/telem_proto.h`. The DAQ code is in `src/telem.c`.
 
 ### Modes
@@ -237,7 +238,7 @@ All DAQs run the same firmware. The WiFi mode is saved in the flash and is read 
 | Mode | Use | What it does |
 | :-- | :-- | :-- |
 | `OFF` (default) | Every DAQ that only records | No WiFi code runs. No radio, no task, no buffer. The sink does one test of a variable for each sample. |
-| `UPLOAD` | DAQ near the rocket | Keeps every Nth sample of each sensor and sends them to the server in batches. |
+| `UPLOAD` | DAQ with the WiFi link (it can have no sensors) | Keeps every Nth sample of each sensor, of its own sensors and of every other DAQ in the chain, and sends them to the server in batches. |
 | `DOWNLOAD` | DAQ in the bunker | Gets the data from the server and prints it on the USB live stream. It does **not** print its own sensors. |
 
 If the mode is `UPLOAD` or `DOWNLOAD` but the SSID or the server is not set, the DAQ stays in `OFF` (`run=OFF` in the reply of `WIFI GET`).
@@ -254,12 +255,19 @@ Each command saves to the flash. The reply is one line, `WIFI:OK ...` or `WIFI:E
 The MATLAB app `DAQ_Calibration_App` has a *WiFi / Telemetry...* window that sends these commands (button next to *Files & Plot...*).
 
 ### UPLOAD mode (`telem_push`, `upload_task`)
-- The sink calls `telem_push()` for each sample. It keeps every Nth sample (PT and load cell count separately), and writes it into a
-  ring of 8192 records (64 KB) in the PSRAM. It never waits. When the ring is full, the oldest record goes and `drops` goes up.
+- The sink calls `telem_push()` for each sample of the own sensors. The chain receive tasks call `telem_push_remote()` for each PT and load cell
+  packet of the other DAQs (and `telem_push_remote_cal()` for their calibration blocks). Each device ID and each sensor has its own decimation
+  counter, so it keeps every Nth sample of each. A record goes into a ring of 16384 records (144 KB) in the PSRAM, with the device ID of the
+  board that made it. The ring and the counters are under one short spinlock because there are three writers (the sink on core 1, two chain
+  tasks on core 0). It never waits. When the ring is full, the oldest record goes and `drops` goes up.
+- A DAQ does not need sensors to be the upload DAQ: it sends what the chain gives it. A DAQ in the chain sends its samples on the chain
+  also when it does not record, and the UPLOAD DAQ passes them to the server.
 - The task `telem` runs on **core 0**, priority 2, as the WiFi task. The ADS1115 ISR and the PFS writer are on core 1 and are not touched.
   The task starts after the PFS mount, so the mount time does not change.
-- Every 500 ms, it sends one frame for each sensor (`DATA_PT`, `DATA_LC`). It sends the calibration block (`CAL`) at the start, when the
-  values change, and every 30 s. It sends `STATUS` (RSSI, drops, queue, uptime, reconnects) every 2 s.
+- Every 500 ms, it sends one frame for each DAQ and sensor (`DATA_PT`, `DATA_LC`). The `src_dev` of a frame is the device ID of the DAQ that
+  made the data (not the ID of the upload DAQ). It sends the calibration block (`CAL`) of each DAQ at the start and each time a new one comes
+  (the DAQs repeat it every 30 s). The upload DAQ sends its own `CAL` only when its own sensors give samples. It sends `STATUS` (RSSI, drops,
+  queue, uptime, reconnects) every 2 s, with its own ID.
 - The link breaks on any error, or after a send time-out of 3 s. The task then reconnects (wait 1 s, then up to 10 s). After a reconnect it throws
   away the ring, so the viewer gets the present. The old data stays in the NAND and SD files. The telemetry never saves or re-sends data.
 - Power-save of the WiFi modem is off (it adds delay and lost frames). This raises the current, so test with the real power supply (brown-out level 3 is on).
@@ -278,10 +286,57 @@ The MATLAB app `DAQ_Calibration_App` has a *WiFi / Telemetry...* window that sen
 - The stream starts after `MATLAB PING`, as always.
 
 ### MATLAB: `DAQ_Live_Monitor`
-Connect it to the DAQ in the bunker (Auto-Connect). It shows PT (PSI) and the load cell (N) on one time axis, with the latest values in large
-type. The samples of a batch get their time from the end of the batch and the sample interval, so a gap in the data stays a gap in the plot.
-The banner is green (`LIVE`, data age), red (`STALE` when the data age is above the limit, or `NO LINK` when no batch comes for 8 s), or orange
-(the DAQ is not in `DOWNLOAD` mode). It also writes `telemetry_live_<time>.csv`. Without a received calibration it shows volts and mV/V.
+Select the source, then push *Connect*:
+- **Server (TCP)** (default): the PC is a `DOWNLOAD` client of the server. It does the same steps as the `DOWNLOAD` DAQ: `HELLO` with the
+  token, then `GET(cursor, 15000 bytes, wait 2 s)` in a loop. Type the host, the port and the token. The app keeps the host and the port in
+  the MATLAB preferences of the PC. The token field starts with the team token (`defTok` in the code), or with the environment variable
+  `DAQ_TELEM_TOKEN` when it is set. A wrong token stops the connection. After any other break, the app connects again (1 s, then up to 10 s) and
+  continues at its cursor, so no data is lost while the server keeps it. Each sample keeps the time of its DAQ (its microsecond clock),
+  so the plot shows the real time between the samples. The info line shows the `STATUS` of the upload DAQ (RSSI, drops, queue, uptime,
+  reconnects).
+- **DAQ on USB**: connect it to the DAQ in `DOWNLOAD` mode (the scan for the port is automatic). The samples of a batch get their time from
+  the end of the batch and the sample interval (`T:DTPT`, `T:DTLC`). This source has no history.
+
+**History.** The server keeps the frames of many hours in memory. The *History* list selects the old data that *Connect* loads before the
+live view starts: none, the last 2, 10 or 30 minutes of data, or all that the server has. The app measures the frame rate on the last
+300 frames and starts that many minutes before the newest frame. The banner shows the progress. While the server has more data, the app
+asks again at once (10 minutes of data is about 0.7 MB: a few seconds over the internet). To see the static fire after it happened, select the history and push
+*Connect* again.
+
+**Save & clear server.** This button makes the server close its archive files (they stay on the server), start new files, and empty its
+history (frame `RESET`, see `server/README.md`). Use it after a very long idle time, so that no login on the Linux server is necessary. The app
+asks first. Then it clears its own plots too and starts a new CSV file. A server of an older version refuses `RESET` (redeploy it from git).
+
+**Units.** Pressure (psi) = PT scale × volts − PT tare (default scale 494.586 psi/V). Force (lbf) = LC scale × mV/V − LC tare (default
+scale 1196.14 lbf per mV/V). The thrust shows in lbf or N. *Tare PT* and *Tare LC* set the tare of each DAQ to the mean of its last 2 s.
+The scales and the tares stay in the MATLAB preferences. The calibration that is saved in the DAQ is not used by this app.
+
+**Plots.** Each DAQ that sends data gets its own line, with the same colour in both plots and a legend entry ("DAQ 5"). Each board has its
+own clock, so each DAQ has its own time map; two DAQs line up to about 0.5 s. A gap in the data is a gap in the line. The screen draws
+4 times per second at most, and only when the data changed. A line has 1500 points at most: in a long window, each bucket of samples
+gives its minimum and its maximum, so the peaks stay visible (the same method as *Files & Plot*). The labels change only when their text
+changes. The y-axis spans 5 % of the full scale at least (*FS psi*, default 2000; *FS lbf*, default 2500), so the noise of a quiet sensor
+stays small.
+
+**Overview and view.** A thin overview under the plots shows all the data in memory: one colour row for pressure (P) and one for thrust (T).
+The colour is |value| / full scale (light grey = quiet, orange, red = full scale), so the activity is easy to find. A black box shows the part
+in the plots. The *View* slider moves that part: at the right end the view is `LIVE` and follows the newest data. A click on the overview
+also moves the view. The *Width* slider sets the width of the view (5 s to 4 h, log scale).
+
+**Motor performance.** The button opens a window that finds the strongest peak of thrust and of pressure in all the data in memory:
+- The noise comes from the differences of neighbour samples. A peak must be 15 times the noise and 5 N (or 5 psi) at least.
+- The baseline is the median of the 2 s that end 0.2 s before the burn. It is removed first, so a load cell without a tare is not a problem.
+- Burn: from where the thrust passes 5 % of the peak going up, to where it goes below 5 % after the peak (interpolated crossing times).
+- Peak thrust: the mean of the highest 5 % of the burn samples. Total impulse: trapezoids over the burn, in N s. Average thrust:
+  impulse / burn time. It also gives the motor class, the same values for the pressure, and warnings (the peaks do not line up, the data
+  starts or ends inside the burn, a data gap in the burn).
+- *Save results* writes `motor_performance_<time>.txt`, `_curve.csv` and two PNG plots.
+- The telemetry is decimated (about 60 samples/s). Use the SD or NAND file for the final numbers.
+
+The banner is green (`LIVE`, data age), blue (history load), red (`STALE` when the data age is above the limit, `NO LINK` when no batch
+comes for 5 s (TCP) or 8 s (USB), or a wrong token), or orange (the USB DAQ is not in `DOWNLOAD` mode). The app writes
+`telemetry_live_<time>.csv`: unix time, `daq` (the device ID, or `USB`), sensor, time, `board_time_us` (empty for USB), the value in V or
+mV/V, and the value in psi or lbf with the tare of that moment. The old data from the history goes in the same file.
 
 ### Not tested yet
 - The firmware builds (all code compiles with `-Wall -Werror` and links), but it has not run on a board. Not yet measured: free heap and boot time

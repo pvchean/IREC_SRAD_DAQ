@@ -159,6 +159,8 @@ static void handle(int port, const uint8_t *pkt, size_t len)
     if (type == CHAIN_TYPE_HELLO) { s_flags[dev] = pkt[HDR]; }
     send_to(1 - port, pkt, len);                  /* repeat on the other port */
     s_st.forwarded++;
+    if (type == CHAIN_TYPE_ADS || type == CHAIN_TYPE_LOADCELL) { telem_push_remote(dev, pkt + HDR, cnt); }   /* WiFi UPLOAD mode only */
+    else if (type == CHAIN_TYPE_CAL) { telem_push_remote_cal(dev, pkt + HDR, cnt); }
     if ((type == CHAIN_TYPE_ADS || type == CHAIN_TYPE_LOADCELL || type == CHAIN_TYPE_CAL) && rec_get()) {   /* recording = saving */
         sd_log_push_remote(dev, pkt + HDR, (size_t)cnt * rec_size(type));
     }

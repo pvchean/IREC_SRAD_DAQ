@@ -269,6 +269,62 @@ int main(int argc, char **argv)
         uint8_t t = 0; std::vector<uint8_t> p;
         CHECK(d6.recv_frame(2000, &t, &p) && t == TP_NAK, "download client sends data: NAK");
     }
+    /* 14. Two DAQs send through one upload connection (the upload DAQ repeats the chain). The server keeps the last CAL of each,
+       and a new viewer gets both CAL frames first. The data of both DAQs stays in the frames with its own src_dev. */
+    {
+        Conn up3;
+        CHECK(login(up3, TP_ROLE_UPLOAD, g_token), "upload 3 login");
+        auto cal_a = records(0xFFFFFFF0U, 6), cal_b = records(0xFFFFFFF0U, 6);
+        cal_b[4] = 77;                                           /* a different block for DAQ 5 */
+        up3.send_frame(5, TP_CAL, cal_b);
+        up3.send_frame(2, TP_CAL, cal_a);
+        up3.send_frame(5, TP_DATA_PT, records(9000, 4));
+        up3.send_frame(5, TP_DATA_LC, records(9100, 4));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        Conn d7;
+        CHECK(login(d7, TP_ROLE_DOWNLOAD, g_token), "download 7 login");
+        d7.send_frame(2, TP_GET, get(TP_CURSOR_NOW, 8192, 1000));
+        Batch b8;
+        CHECK(read_batch(d7, 3000, &b8), "NOW batch with two DAQs");
+        int cals = 0;
+        for (const auto &f : b8.frames) { if (f.first == TP_CAL) { cals++; } }
+        CHECK(cals == 3, "NOW: the last CAL of each of the 3 DAQs (src 1, 2, 5)");
+        d7.send_frame(2, TP_GET, get(0, 15000, 1000));
+        Batch b9;
+        CHECK(read_batch(d7, 3000, &b9), "full batch");
+        int pt5 = 0;
+        for (const auto &f : b9.frames) { if (f.first == TP_DATA_PT && f.second.size() == 32) { pt5++; } }
+        CHECK(pt5 >= 1, "the data frames of DAQ 5 are stored");
+    }
+
+    /* 15. RESET from a download client: the server answers RESET (head, archive name), the ring is empty after it (a GET from 0
+       gives no old frame), the frame index continues, and new data comes as before. */
+    {
+        Conn d8;
+        uint64_t head0 = 0;
+        CHECK(login(d8, TP_ROLE_DOWNLOAD, g_token, 0, &head0), "download 8 login");
+        d8.send_frame(2, TP_RESET, {});
+        uint8_t t = 0; std::vector<uint8_t> p;
+        CHECK(d8.recv_frame(2000, &t, &p) && t == TP_RESET && p.size() > 8, "RESET answer");
+        CHECK(p.size() >= 8 && tp::get64(p.data()) == head0, "RESET: the head continues");
+        std::string nm(p.begin() + 8, p.end());
+        CHECK(nm.rfind("archive_", 0) == 0 && nm.size() > 12 && nm.substr(nm.size() - 4) == ".tlm", "RESET: archive name");
+        d8.send_frame(2, TP_GET, get(0, 15000, 300));
+        Batch b10;
+        CHECK(read_batch(d8, 2000, &b10), "batch after RESET");
+        CHECK(b10.frames.empty() && b10.next == head0, "RESET: no old frame");
+        Conn up4;
+        CHECK(login(up4, TP_ROLE_UPLOAD, g_token), "upload 4 login");
+        up4.send_frame(5, TP_DATA_PT, records(12000, 5));
+        d8.send_frame(2, TP_GET, get(0, 15000, 2000));
+        Batch b11;
+        CHECK(read_batch(d8, 3000, &b11), "batch with new data after RESET");
+        CHECK(b11.frames.size() == 1 && b11.next == head0 + 1, "RESET: new data comes, the index continues");
+        Conn up5;                                                /* an upload client may not send RESET */
+        CHECK(login(up5, TP_ROLE_UPLOAD, g_token), "upload 5 login");
+        up5.send_frame(1, TP_RESET, {});
+        CHECK(up5.recv_frame(2000, &t, &p) && t == TP_NAK, "upload client sends RESET: NAK");
+    }
 
     std::printf("%d checks passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
