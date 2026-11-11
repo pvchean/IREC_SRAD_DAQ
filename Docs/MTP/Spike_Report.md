@@ -150,3 +150,67 @@ Host: Arch Linux, kernel 7.2.11, xhci. `dmesg` needs root: use `journalctl -k --
      subscribed, panic -> reboot) and an `esp_register_shutdown_handler()` that calls `tud_disconnect()`. A panic reboot also keeps the pull-up
      on (the host sees a stale device), so a hung unit still needs the cable replug. This is a real risk for the DAQ: keep the BOOT button reachable.
 * Steps 3 (rest) and 4 NOT done: no MTP host test and no CDC-during-MTP test were possible.
+
+## MTP-P-10 FIX agent run (2026-11-11 02:00 to 02:15)
+Result in one line: patches P1, P2, P4 are built and the watchdog is PROVEN. Patch P3 (first version) broke the USB Serial/JTAG pad.
+The board is now INVISIBLE to the host (port "not attached"). A human must put it in ROM download mode (hold BOOT, plug or reset). No MTP host test ran.
+Commit f99bfc3 holds all firmware changes. Zero NAND writes (the spike has no NAND code).
+
+### MTP-P-10.1 What was changed (all in tools/mtp_spike/)
+* P1 `fork/esp_tinyusb/tinyusb/src/class/mtp/mtp_device.c`: `prepare_new_command()` has a busy check and a failure path (1c);
+  DEVICE_RESET SETUP stage answers with `tud_control_status()` (1a); COMMAND phase re-arms OUT on a late IN completion or a ZLP,
+  and a short or wrong-type packet sets ERROR (both bulk EPs halted, host recovers with 0x66) (1b). Built, NOT tested on the host.
+* P2 `fork/esp_tinyusb/tinyusb_task.c`: the TinyUSB task subscribes to the task watchdog. Loop: `tud_task_ext(1000,false)` then `esp_task_wdt_reset()`.
+* P4 `sdkconfig.defaults`: `ESP_TASK_WDT_PANIC=y`, `ESP_TASK_WDT_TIMEOUT_S=8`, `TINYUSB_DEBUG_LEVEL=0`, `TINYUSB_MTP_TRACE_WRITES=y`,
+  and `ESP_SYSTEM_PANIC_SILENT_REBOOT=y` (added by me: a panic print to the dead USJ console could block the reset). TinyUSB task stack 6144.
+  The generated files `sdkconfig.spike*` are git-ignored: delete them after you edit `sdkconfig.defaults`, or the edit has no effect.
+* `src/main.c`: CDC commands `HANG` (the USB task spins for ever) and `ABORT` (`abort()`); shutdown handler `usb_shutdown` (tud_disconnect + 500 ms);
+  P3 function (see 10.3). `host_cdc.py PORT CMD [seconds]` sends one CDC command.
+* `host/ptp_probe.c`: raw libusb client, compiles with no warnings (`gcc -O2 -Wall -Wextra ptp_probe.c -lusb-1.0`). NOT run (no board). See 10.5.
+
+### MTP-P-10.2 Watchdog proof (PASS, firmware v1 = P1+P2+P3v1+P4)
+* 02:02:17 CDC `HANG` (USB task spins in `on_rx`). 02:02:25 the host log shows `USB disconnect` (8 s TWDT). 02:02:35 the device is back as 303a:4041
+  (10 s grace, then files mode). CDC `INFO` after it says `up 34 s` (a real reboot). No human, no usbreset.
+* The host saw the disconnect only because of P3 (a panic reboot keeps the old D+ pull-up, MTP-P-9.3).
+* Flash path that worked: CDC `DL` (4 s) then `pio run -e spike_force -t upload --upload-port /dev/ttyACM0` (flash verified; the final
+  "could not open port" line is only the esptool post-reset check, ignore it).
+
+### MTP-P-10.3 Failure: P3 version 1 killed the USB Serial/JTAG pad (board lost at 02:03:33)
+* P3 v1 ran at EVERY boot: `usb_wrap` and `usb_serial_jtag` pull override with D+/D- pull-down, 200 ms, then `disable_pull_override`.
+* Symptom 1 (02:01:35 and 02:02:25): in the 10 s grace the host saw NO 303a:1001 (before P3 it did). After the grace, 4041 and CDC were fine.
+* Symptom 2 (02:03:33): CDC `DL` -> `USB disconnect`, and then nothing for ever: `usb1-port1/state` = `not attached`, no 303a in `lsusb`, no kernel message.
+  The chip is most likely in ROM download mode with no D+ pull-up.
+* Cause (best explanation, UNVERIFIED): the USB Serial/JTAG registers survive a software reset (the device stays connected over `esp_restart()`).
+  P3 left `conf0` with dp_pullup=0 and dp_pulldown=1. `disable_pull_override` does not restore the values. The ROM download mode then has no pull-up.
+* Lesson: I saw symptom 1 and went on. I should have stopped there. DL must be re-tested on every new firmware BEFORE a second step.
+* Fix in the source (commit f99bfc3, NOT flashed, NOT tested):
+  (a) `usj_pads_restore()` writes the normal values (dp_pu=1, rest 0) with the override ON, then turns the override OFF. It runs at the end of P3
+  and before every restart in the REBOOT and DL path.
+  (b) P3 runs only after a crash reset (`ESP_RST_PANIC`, INT_WDT, TASK_WDT, WDT), not at power-on or after a software restart.
+  So the path that was proven at 02:00 (DL from a clean boot) is unchanged. Build flag `-DUSB_P3_ALWAYS=1` forces P3 at every boot.
+
+### MTP-P-10.4 How to recover the board (human needed) and what to do next
+1. Hold the BOOT button (GPIO 0), plug the USB cable in (or press RESET while BOOT is held). `lsusb` must show 303a:1001. Release BOOT.
+   (If a plain replug already gives 303a:1001 for 10 s, the board runs v1: flash in that window with the same command. Probably it does not.)
+2. `cd tools/mtp_spike && ~/.platformio/penv/bin/pio run -e spike_force -t upload --upload-port /dev/ttyACM0` (builds the fixed v3).
+3. Test in this order, one step at a time, stop at the first surprise:
+   a. Power cycle: 303a:1001 in the grace? Then 4041 after 10 s? CDC `INFO`.
+   b. CDC `DL`: does 303a:1001 come back in 4 s? If yes, flash the same build again through it (proves the way back).
+   c. CDC `HANG`: 303a disconnect after ~8 s, back as 4041 after ~10 s (as in 10.2). Then 1001 visible in the grace? Then CDC `DL` again (the pads are
+      restored by `usj_pads_restore()`). If any of b or c fails, the board needs BOOT again: do not go on, report.
+   d. Only then the MTP host test: `gcc -O2 -Wall -o $SCRATCH/ptp_probe tools/mtp_spike/host/ptp_probe.c -lusb-1.0`, then stage by stage:
+      `ptp_probe -c /dev/ttyACM0 -s 1`, `-s 2`, ... `-s 7`, then `-r` (DEVICE_RESET). Each transfer has a 3 s timeout. If the board stops
+      answering, the watchdog resets it in 8 s (CDC `INFO` shows the uptime). Last step: `mtp-detect` once, then `mtp-files`, `mtp-folders`.
+
+### MTP-P-10.5 ptp_probe design (for the next agent)
+Interface 2, EP 0x04 OUT, 0x84 IN. No `libusb_reset_device`, no `set_configuration`, no `clear_halt`. Stages 1-7 as in the file header:
+GET_DEVICE_STATUS, OpenSession, GetDeviceInfo, GetStorageIDs, GetStorageInfo, GetObjectHandles (root 0xFFFFFFFF, then NAND), GetObjectInfo,
+GetObject F00002 (100 KB), GetObject F00001 (3 MB, prints KB/s, compares with the pattern `(offset & 0xFF) ^ file number`), 20 GetPartialObject
+reads at fixed-seed random offsets (also offset 0, the last 100 bytes, an unaligned range and a read beyond EOF), SendObjectInfo and DeleteObject
+(must be refused with 0x200E or 0x200F). `-c PORT` prints CDC `INFO` after each phase (the firmware task is alive or not) and the `LOG` ring on a failure.
+Exit code 0 = PASS. Known weak spots: the SendObjectInfo refusal path (the code first waits 1 s for an immediate response, then sends the data phase);
+a refusal after a data phase may trigger the P1b ERROR stall: then use `-r` to test the recovery.
+
+### MTP-P-10.6 State of the board at the end of this run
+Firmware on the flash: v1 (commit-equivalent of P1+P2+P3v1+P4, built before f99bfc3 changes to P3). It is the version with the pad bug, so the board
+needs BOOT-button recovery (10.4). Hardware tests after that: none done by this agent. Zero NAND writes.
