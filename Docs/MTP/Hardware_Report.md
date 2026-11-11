@@ -160,3 +160,38 @@ The OpenSession refresh lasts about 0.05 s. A timed hit is not repeatable with t
 * What a hang costs in files mode: about 20.5 s with no USB. An MTP copy in progress fails (partial file); the user must start it again. No NAND data is touched (read only, `blocked_writes=0`).
 * Not proven: (1) other crash types (panic by abort, stack overflow, interrupt watchdog): only the task-watchdog path was tested, because only `HANG` exists in this build. (2) Other hosts: Windows, macOS, a USB hub, a different xHCI chip may keep a stale device. (3) A hang in serial/recording mode (`daq`): HANG is not in that build, and the recovery there is not tested. (4) A hang in the middle of a bulk transfer on the host side was tested only with kioclient5/libmtp-like KDE access, not with the raw `ptp_probe`.
 * Files: timelines and read logs are in the scratchpad (`hang/t1a..t2b.timeline`, `*.reads`), not committed.
+
+## MTP-HW-9 Switch test, step 1: env `daq_mtp` with MODE2 (GPIO 2) in the FILES position (2026-11-11 09:33, user at the PC)
+Verdict: PASS. The board has a working MODE2 switch now. With the switch low, `daq_mtp` (no force) boots to files mode. NAND writes: zero. No `LEAVE`, no `REC ON`, no `daq` or `daq_sim` flash.
+The earlier note "GPIO 2 reads high, no switch" is out of date. Evidence: `daq_mtp` has no `DAQ_MTP_FORCE_FILES`, so `io_init()` sets files mode only when `gpio_get_level(MODE2_PIN) == 0`. The LOG ring starts after `io_init()`, so the `mode2=files` line is not in it. The proof is the behaviour (files mode, no "files mode skipped once" line).
+
+### MTP-HW-9.1 Build checks (`pio run -e daq_mtp`)
+* Build: SUCCESS, no warning. RAM 64.7 %, flash 27.7 % (1162189 B).
+* `nm`: `T` for the six `tud_mtp_*_cb` (command_received, data_complete, data_xfer, request_cancel, request_device_reset, request_get_device_status). Three optional callbacks stay `W` (normal).
+* The string `HANG` is absent from the `daq_mtp` image (count 0). It is present in the `daq_mtp_force` image (count 1), as designed.
+* `tools/mtp_hosttest/run.sh`: 8427 checks passed, 0 failed.
+
+### MTP-HW-9.2 Flash and boot
+* Before the flash, the force build answered `INFO`: `mode=files rec=0 mounted=1 blocked_writes=0 nor_blocked=0 lost_pages=0`. LOG: `reset reason 6` (old HANG test), DIAG main stack 3408.
+* CDC `DL`: `303a:1001` and `/dev/ttyACM0` in about 1 s. Flash `-e daq_mtp -t upload --upload-port /dev/ttyACM0`: 1162624 B, hash verified.
+* Bus watch after the flash (switch low): `303a:1001` for the grace window, then the board left the bus, then `303a:4041` plus `/dev/ttyACM0` at about 12 s after the reset. This is the same sequence as `daq_mtp_force`.
+* CDC `INFO`: `mode=files rec=0 mounted=1 index=1 blocked_writes=0 nor_blocked=0 lost_pages=0`.
+* CDC `LOG` (read to `END`): `reset reason 11` (USB download reset, because the flash used `DL`), `FILES MODE (read only): no recording, no sensors, no WiFi`, `NAND mounted read only: refused writes nand+nor=0`, the 10 s countdown, `files mode running (MTP + CDC)`, the SD error from the missing card. DIAG: `heap_free=54516 heap_min=51576`, free stack TinyUSB=6628 mtp_vfs=5916 cmd=6560 main=3424 led=2120.
+
+### MTP-HW-9.3 MTP checks (kioclient5, kiod6 holds the interface)
+* `mtp:/IREC DAQ/DAQ` lists `NAND` and `SD`.
+* 3 copies of `NAND_F00002D4.BIN`: 0.57, 0.60, 0.59 s. Each 323696 B, CRC32 f3d49e4f.
+* `INFO` after the copies: `blocked_writes=0 nor_blocked=0 lost_pages=0`. LOG: no new error.
+* CDC `HANG` in this image: reply `ERR not available in files mode (read-only)`. The board stayed on the bus (`4041`), `INFO` clean after. The HANG test command is not in `daq_mtp`.
+* Not run: `ptp_probe` (kiod6 holds the interface), write refusal test (done in MTP-HW-7).
+
+### MTP-HW-9.4 Check list for the user's flip to the SERIAL position (MODE2 high)
+This build in serial mode is the full DAQ firmware: sensors, chain, `pfs_writer`, read-write PFS mount, WiFi/telemetry as in `daq`. Recording is locked (`REC ON` refused, MODE1 does not auto-record). No `LEAVE` and no `REC ON`.
+1. Flip the switch, then do a full power cycle (unplug 3 s, plug in). A flip alone does not change the mode: `io_init()` reads GPIO 2 at boot only.
+2. `lsusb`: only `303a:1001` (USB Serial/JTAG). It must stay. No `303a:4041` may appear, now or after 30 s. `/dev/ttyACM0` must exist.
+3. Serial: open the port at 115200. The DAQ banner and the normal commands must answer (`PING` gives `DAQBOARD V1`). No "FILES MODE" line.
+4. `INFO`: must show `mode=serial` (not `mode=files`), and rec locked (rec=0). Read it only. `REC ON` must NOT be sent as a test of the lock unless the user agrees (NAND write risk). Check that the sensors run (`STATUS`, `STREAM` if the user wants) and that the LED shows normal DAQ states.
+5. No TinyUSB: the LOG must not show `tinyusb_mtp`, `TinyUSB Driver installed`, or `usb_files: files mode running`. `usb_files_early_init` still runs (reset reason line, "USJ pads were clean").
+6. MODE1: with MODE1 high at boot the board must NOT record (`io_rec_disable()`: log line `daq_mtp build: recording is disabled`). The AUTOREC LED must stay off.
+7. Watchdog: `daq_mtp.defaults` sets TWDT 8 s, panic, silent reboot for both modes. In serial mode a blocked task would reset the board with no message (the log shows `reset reason 6` after the reboot). Watch 2 minutes of normal run: there must be no unexpected reboot (the USB 1001 device must not disconnect). `HANG` does not exist in this image, so the watchdog cannot be forced. Debug serial mode with `daq`, not `daq_mtp`.
+8. Return to files mode: flip the switch to low and power cycle (or CDC/serial `DL` and a flash). Expected: 1001 for about 10 s, then 4041.

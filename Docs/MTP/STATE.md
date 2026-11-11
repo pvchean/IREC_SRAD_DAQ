@@ -186,3 +186,7 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 
 ## 09:3x HANG crash-recovery test (MTP-HW-8): PASS, 5 of 5 cycles, no human
 * `HANG` (task watchdog) 3 times idle, 2 times during a `kioclient5` read. Host saw a disconnect at 8.7 s, 1001 at 9.1 s (11 s grace), 4041 at 20.5 s. No stale device (MTP-V-1 not reproduced on this PC), no xhci error, other USB devices unaffected. LOG shows `reset reason 6` (task WDT) and the grace countdown. INFO clean after each cycle (blocked_writes=0 nor_blocked=0 lost_pages=0 mounted=1). Reads after recovery CRC f3d49e4f. The read in progress fails after about 8.7 s and leaves a partial file. CDC `DL` + pio flash still work after the crashes (reflashed the same daq_mtp_force). Fix MTP-V-1.3 not needed on this evidence, not applied. Not tested: panic/abort/INT-WDT crashes, Windows/macOS, crash in `daq` serial mode. Details: Hardware_Report.md MTP-HW-8.
+
+## MTP-HW-9 (11 Nov, user at the PC): switch test step 1 PASS. See Hardware_Report.md MTP-HW-9.
+* Env `daq_mtp` (no force) is on the board, MODE2 switch in FILES position (GPIO 2 low): 1001 for the grace window, then 4041. INFO mode=files blocked_writes=0 nor_blocked=0 lost_pages=0. 3 kioclient5 copies CRC f3d49e4f. `HANG` is refused in this image (string absent). nm T x6, host test 8427/8427. NAND writes: zero.
+* Next: the user flips MODE2 to the serial position and power cycles; check list in MTP-HW-9.4 (only 1001, no 4041, DAQ banner, INFO mode=serial, rec locked, no TinyUSB, no WDT reboot). No LEAVE, no REC ON.
