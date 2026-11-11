@@ -1,0 +1,9 @@
+# Stock: espressif/esp_tinyusb 3.0.0 (TinyUSB 0.21.0). override_path: the local fork in fork/esp_tinyusb (read-only MTP, plain
+# VFS storage, P1 back-port of the mtp_device.c recovery, P2 watchdog feed in the USB task, session-open hook).
+# Do not put the fork in a folder named "components": IDF would find a second component named esp_tinyusb.
+dependencies:
+  idf: ">=6.1,<6.2"
+  espressif/esp_tinyusb:
+    version: "3.0.0"
+    override_path: "fork/esp_tinyusb"
+    require: public
