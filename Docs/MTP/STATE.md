@@ -41,3 +41,14 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * Untested and critical: lsusb, libmtp, GetPartialObject, speed, CDC `DL` and `REBOOT` (the way back from files mode).
 * Next: Spike_Report.md MTP-P-7: flash `spike_force`, wait 10 s grace, lsusb -v; test REBOOT, then DL, before anything else.
 * Ledger: window A agent tokens total ~ 190k+190k+280k+170k = ~830k (integration agent still unreported).
+
+## Integration agent report (~200k tokens, WIP commit 73912f9)
+* `-e daq` and `-e daq_mtp` build. Not flashed. Done: console_io (cio_*), files_mode, io_rec_disable + RTC force-serial flag,
+  nor_ro (no-format read-only LittleFS NOR HAL), main.c files-mode branch (DAQ_MTP + MODE2 low), `daq_mtp` env (REC ON refused),
+  files-mode command allowlist + LEAVE. Details: Boot_Integration.md.
+* Not done: mtp_store_test.sh run, Deviation Log + README/board.h lines, weak-symbol link check (`nm` on the ELF; else WHOLE_ARCHIVE
+  or #ifdef), real read-only mount on the board, `DL` command (spike has it; merge it).
+* Window A agent total ~ 1.03M tokens (research 280k, storage 190k, spike 170k, integration 200k, + orchestrator).
+* Next (window B): (1) spike host tests, REBOOT then DL first. (2) Merge the spike fork + CDC into the daq_mtp build: strong
+  files_mode_usb_start(), cio_set_backend(CDC), mtp_store backends behind the VFS shim. (3) Test on Linux with the board, read-only.
+  (4) Deviation Log, README. (5) Final summary at 10:45.
