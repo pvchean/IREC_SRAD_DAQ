@@ -117,3 +117,6 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
   DL+reflash, REBOOT, LEAVE, then ptp_probe -s 1..6, mtp-detect only last. STOP at the first anomaly (Board-safety rules). Check `nm -C firmware.elf | grep tud_mtp_` shows T.
 * If 303a:4041 appears (board running old spike v1/v3?) read Spike_Report.md to see which firmware; do not run mtp-detect.
 * Zero NAND writes. Agent tokens since 00:00: ~2.6M.
+
+## 06:25 Window B started (resume job). Board still missing (no 303a). Started sonnet HOST-HARNESS agent (tools/mtp_hosttest): real MTP handler code + mocked transport + scripted PTP session; fixes bugs it finds. Report: HostTest_Report.md.
+* Token rule for window B: stop launching agents when window-B agent tokens pass ~2.6M or at 11:00.
