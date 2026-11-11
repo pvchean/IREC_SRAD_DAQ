@@ -120,3 +120,13 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 
 ## 06:25 Window B started (resume job). Board still missing (no 303a). Started sonnet HOST-HARNESS agent (tools/mtp_hosttest): real MTP handler code + mocked transport + scripted PTP session; fixes bugs it finds. Report: HostTest_Report.md.
 * Token rule for window B: stop launching agents when window-B agent tokens pass ~2.6M or at 11:00.
+
+## 06:5x HOST HARNESS report (~450k tokens; commits e6032cf, 320ab75, bc38e7a; HostTest_Report.md MTP-H-1..7)
+* `tools/mtp_hosttest/run.sh` (20 s): real fork mtp/*.c, real mtp_device.c (P1), real mtp_vfs.c + mtp_store_pfs.c on fake PFS, mock TinyUSB endpoints, libmtp-style scripted session.
+  15 groups, 8427 checks, 0 failed (ASan/UBSan). First run on unfixed code: 758 failed checks = 11 real defects, all fixed (marked `FORK (MTP-H)`, Deviation Log rows).
+* Fixed: refused SendObjectInfo/SendObject deadlock (data phase now read and dropped, then error 0x200E/0x200F/0x2005); response mid-transfer went out as file bytes; SessionNotOpen / OpenSession id 0 / SessionAlreadyOpen;
+  GetObjectHandles root(0xFFFFFFFF) vs all(0) swapped; root ParentObject 0; ThumbFormat, ObjectInfo dates, ProtectionStatus=1, ObjectFileName Get-only, GetObjectPropList handle 0, DeviceInfo events.
+* Not fixed (documented): transaction IDs unchecked; GetObjectPropList(folder, depth 1) includes the folder; CLEAR_HALT alone does not revive bulk pipe (0x66 does); DEVICE_RESET closes the session.
+* Cannot show: real libmtp/Windows/macOS, DWC2/DMA, USB task timing/stack (6144 B estimate), real SD, usb_files.c/boot code. Highest-risk change on a real host: GetObjectHandles root fix.
+* daq_mtp_force builds clean; nm shows T for 6 tud_mtp_*_cb and mtp_dispatch.
+* Window B agent tokens so far: ~450k (window A total ~2.6M).
