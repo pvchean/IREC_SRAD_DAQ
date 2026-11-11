@@ -54,3 +54,11 @@ In files mode no code calls `pfs_writer_run`, `pfs_ingest`, `pfs_flush`, page pr
 ## MTP-B-7 Next steps, in order
 
 1. Run `tools/mtp_store_test.sh`. 2. Do the weak-link test above. 3. Write the Deviation Log entries (MODE2 "files = not used yet" in `board.h` and README now used; `daq_mtp` locks REC; `cio_*` names; `cmd_start` installs the driver through `cio_init`). 4. Edit the README files-mode lines (line 26, `board.h` line 33 comment). 5. Flash only after the spike agent agrees; check `INFO` shows MODE1 low or use `daq_mtp`.
+
+## Link check
+
+Date: 2026-11-11. Build: `pio run -e daq_mtp` passed (RAM 51.9 %, flash 25.4 %).
+`files_mode_usb_start` is in `firmware.elf` (`nm`, xtensa-esp32-elf-nm). Address 0x4200943c.
+The symbol type is `W` (weak). The weak default is linked.
+The weak-link test (MTP-B-6) is not done. This check only shows that the symbol exists.
+No board was flashed.

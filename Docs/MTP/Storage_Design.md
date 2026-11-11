@@ -265,3 +265,15 @@ Test builds: `DAQ_SIM`, `DAQ_TOGGLE`, `DAQ_NANDREAD` run their own code before o
 * Question for the orchestrator: names with or without the `NAND_` and `uSD_` prefix (MTP-S-4).
 * Question: should the NOR HAL be a custom read-only HAL (no format) instead of the stock one (R3)? About 40 lines. Not done.
 * Next steps: the USB agent calls `mtp_store_pfs_get()` and `mtp_store_sd_get()`, and calls `refresh()` at session open. The `main.c` branch and the `io.c`, `cmd.c` changes of MTP-S-7 are for whoever owns those files.
+
+## Host test
+
+Date: 2026-11-11. Command: `bash tools/mtp_store_test.sh`. Result: **PASS** (exit 0).
+
+```
+file0 NAND_F00005D3.BIN size=5724 exact=1
+file1 NAND_F00007D3.BIN size=11256 exact=0
+file0 read: 5724 bytes, 4 NAND page reads (cache works if 4)
+  log: PFS file 7 page 2: read error 13, filler used
+PASS (blocked NAND 3, NOR 1)
+```
