@@ -141,3 +141,5 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
   The hardware agent must SKIP step MTP-M-7.5 (LEAVE). Use REBOOT (back to files mode) and DL only. Only test LEAVE with the user's permission.
 * Windows: no MS OS/BOS descriptor needed (unverified on a real PC). macOS: ptpcamerad grabs the interface; stop it before OpenMTP.
 * Window B agent tokens so far: ~0.85M (host harness 386k, opus review 190k + orchestrator).
+
+## 07:37 BOARD BACK (user reconnected): 303a:4041 'IREC DAQ', /dev/ttyACM0 (a TinyUSB firmware is running, probably spike v1/v3). Started sonnet HARDWARE agent (Hardware_Report.md): INFO, flash daq_mtp_force via DL, grace proof, REBOOT, DL, optional HANG, ptp_probe 1-6 on real NAND, then libmtp. LEAVE forbidden.
