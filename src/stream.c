@@ -3,13 +3,13 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 
 #include "cal.h"
+#include "console_io.h"
 #include "telem.h"
 
 #define SB_SIZE    4096U
@@ -98,7 +98,7 @@ static void stream_task(void *arg)
             else { len += (size_t)snprintf(line + len, sizeof line - len, "%.3f\n", (double)r[i].reading * VOLT_PER_LSB); }
         }
         /* A short timeout: with no host reading, the sample task never waits for this write. */
-        if (len) { usb_serial_jtag_write_bytes(line, len, pdMS_TO_TICKS(20)); }
+        if (len) { cio_write(line, len, 20); }
         s_busy = false;
     }
 }
