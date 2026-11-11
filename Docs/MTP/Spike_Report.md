@@ -90,3 +90,32 @@ libmtp 1.1.23, libusb 1.0.30, python-pyserial 3.5. `jmtpfs` and `python-pyusb` a
 * The log ring uses `esp_log_set_vprintf`; in files mode the USJ console is dropped, not blocking (UNVERIFIED on target).
 * The fork copy is 4.9 MB in git (mostly TinyUSB source). Keep one copy only.
 * `git status` shows other agents' edits to `platformio.ini` and `src/` in this worktree. They are not part of the spike commits.
+
+## MTP-P-9 Test run on the Linux host (second spike agent, 2026-11-11 01:2x)
+Host: Arch Linux, kernel 7.2.11, xhci. `dmesg` needs root: use `journalctl -k --no-pager | grep -v PME`.
+
+### MTP-P-9.1 Step 1: spike_force flash, grace, descriptors (PASS)
+* `pio run -e spike_force -t upload --upload-port /dev/ttyACM0` worked from serial mode (USB Serial/JTAG 303a:1001, no BOOT button).
+* The 10 s grace worked. USB Serial/JTAG printed `SPIKE: files mode in 5 s ...` down to 1, then the device became 303a:4041 "IREC DAQ".
+* `lsusb -v -d 303a:`: Full Speed (12 Mbps), bDeviceClass 239/2/1 (IAD), 3 interfaces, wTotalLength 0x69, MaxPower 100 mA, self-reported bus powered.
+  IAD (interfaces 0-1) = CDC ACM (iInterface "IREC DAQ serial", EP1 IN int 8 B, EP2 OUT/IN bulk 64 B).
+  Interface 2 = class 6 / subclass 1 / protocol 1 (PTP), iInterface "IREC DAQ MTP", EP3 IN int 64 B, EP4 OUT/IN bulk 64 B.
+  Linux binds `cdc_acm` (`/dev/ttyACM0`). Serial number string 2884854684E0.
+* Limit: the ESP32-S3 USB OTG is Full Speed only, bulk packet 64 B. Real MTP read speed will be well below 1.2 MB/s (see MTP-P-9.4 once measured).
+* CDC in files mode works: `INFO` -> `INFO: spike files mode, up 28 s, heap 353108`. Other lines are echoed.
+
+### MTP-P-9.2 Step 2: the way back (REBOOT and DL) (found a bug, fixed, PASS after the fix)
+* BUG (first firmware): CDC `REBOOT` and `DL` reset the chip, but the host never saw a disconnect. The D+ pull-up stays on across
+  `esp_restart()`. The host kept the old stale device 303a:4041 (dead: no CDC answer) for the whole grace time, and for `DL` for ever.
+  The chip was in ROM download mode, but invisible: `esptool --before no_reset` timed out. No BOOT button, no root, was needed to get out:
+  `usbreset 303a:4041` (ACL gives the user write access to /dev/bus/usb; it prints "failed [No such device]" but the host
+  re-enumerates the device as 303a:1001). Then `esptool --before no_reset chip_id` worked (ROM download mode, USB-Serial/JTAG). After the
+  esptool hard reset the RTC flag was cleared and the board booted the app normally.
+* FIX in `tools/mtp_spike/src/main.c` (files_mode loop): after the 300 ms CDC drain, call `tud_disconnect()` and wait 500 ms, then
+  `mux_to_jtag()`, set the RTC flag (DL only) and `esp_restart()`.
+* RESULT after the fix: `REBOOT` -> 1 s later 303a:1001 appears and stays for the 10 s grace, then 303a:4041 again. `DL` -> 303a:1001 within
+  4 s (ROM download mode); `pio run -e spike_force -t upload --upload-port /dev/ttyACM0` flashed and verified with no human help.
+* RULE for the real firmware: ALWAYS call `tud_disconnect()` + 500 ms before any restart from files mode. Fallback if the host shows a stale
+  4041: `usbreset 303a:4041` (no root).
+* Flash from files mode, full recipe: CDC `DL`; wait 4 s; `pio run -e <env> -t upload --upload-port /dev/ttyACM0`.
+  (Scripts: pyserial, open /dev/ttyACM0 at 115200, write `DL\r\n`.)

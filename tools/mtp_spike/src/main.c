@@ -17,6 +17,7 @@
 #include "hal/usb_serial_jtag_ll.h"
 #include "tinyusb_default_config.h"
 #include "tinyusb.h"
+#include "tusb.h"
 #include "tinyusb_cdc_acm.h"
 #include "tinyusb_mtp.h"
 #include "fake_vfs.h"
@@ -103,6 +104,10 @@ static void files_mode(void)
         vTaskDelay(pdMS_TO_TICKS(50));
         if (s_action) {
             vTaskDelay(pdMS_TO_TICKS(300));       /* let the CDC reply go out */
+            /* MTP-P-8: drop D+ so the host sees a disconnect. Without it the pad pull-up stays on across the reset and
+             * the host never re-enumerates (stale device 4041, board invisible). */
+            tud_disconnect();
+            vTaskDelay(pdMS_TO_TICKS(500));
             mux_to_jtag();
             if (s_action == 2) { REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT); }
             esp_restart();
