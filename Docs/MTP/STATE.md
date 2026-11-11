@@ -176,3 +176,6 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * Docs/MTP/User_Guide.md (99 lines). NAND file names are NAND_F<5 decimal digits>D<device>.BIN (not hex). UNVERIFIED: MATLAB apps find the board in files mode (they look for "DAQBOARD V1" on PING), LED behaviour.
 * Next: flash the polished daq_mtp_force via DL (proven path), re-run probe 1-6 and read DIAG main=.
 * Window B agent tokens so far: ~2.0M.
+
+## KDE file-manager test and polish verification (MTP-HW-7, small hw agent)
+* Polished daq_mtp_force is on the board (DL flash OK, DIAG main stack free 3408). KDE path via `kioclient5` works: `mtp:/IREC DAQ/DAQ/NAND`, 3 copies CRC f3d49e4f at about 0.6 s each; write and delete refused; INFO clean (blocked_writes=0 nor_blocked=0 lost_pages=0). Raw libusb tools are blocked by kiod6 (host side). Open: Windows, macOS, HANG, SD card. Details: Hardware_Report.md MTP-HW-7.

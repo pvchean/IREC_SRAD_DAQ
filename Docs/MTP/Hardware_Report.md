@@ -101,3 +101,20 @@ No error, no stall, no reconnect. The port stayed 303a:4041 all the time.
 ### MTP-HW-6.5 Problems and open items
 * No problem with MTP, CDC or the board in any test. No anomaly. The board is still in files mode, mounted read only.
 * Open: the desktop file manager (MTP-HW-6.1). Windows and macOS. HANG (crash recovery). SD card. `main` stack margin 1376 bytes.
+
+## MTP-HW-7 Polished build and KDE file-manager path
+### MTP-HW-7.1 Polish verification (build 83c2640, daq_mtp_force)
+* Flash by `DL` (no BOOT button): OK. Board boots to files mode (MTP + CDC).
+* `INFO`: mode=files mounted=1 blocked_writes=0 nor_blocked=0 lost_pages=0.
+* DIAG: `heap_free=54516 heap_min=51576`. Free stack: TinyUSB=6628 mtp_vfs=5916 cmd=6560 main=3408 led=2120. The main task has 2032 B more margin than before (1376 to 3408).
+* The `MTP trace` lines are gone from the LOG ring. The ring now shows only boot lines, the refresh lines and real events.
+* The raw probe (5 runs) and `mtp-files` were blocked by `kiod6` (KDE kmtpd holds the MTP interface; LIBUSB_ERROR_BUSY). This is a host-side cause. They were not repeated on the polished build.
+
+### MTP-HW-7.2 KDE path (`kioclient5`, the desktop file-manager test): PASS
+* Device URL: `mtp:/IREC DAQ`. Storage: `DAQ`. Folders: `NAND`, `SD`. `NAND` holds `NAND_F00002D4.BIN`. `SD` is empty (no card).
+* Copy of `NAND_F00002D4.BIN` to a local folder, 3 runs: 0.60, 0.58, 0.61 s (about 540 KB/s with the KDE start-up cost). Each copy: 323696 B, CRC32 f3d49e4f.
+* Write test: `kioclient5 copy` of a 3 B local file into `NAND`: refused. KDE said "There is not enough space on the disk" (the storage reports free=0). The file list did not change.
+* Delete test: `kioclient5 rm` of the NAND file: refused ("Could not delete file"). The LOG shows `write operation 0x100b refused (read-only)`. The file list did not change.
+* `INFO` after every action (3 copies, write, delete): mode=files blocked_writes=0 nor_blocked=0 lost_pages=0. The refusals are counted by the MTP layer, not by the NAND layer, so blocked_writes stays 0.
+* LOG after the KDE session (read to `END`): no stall, no protocol error, no reconnect. Only the expected refusal line. The SD errors (`sdmmc_init_ocr 0x107`) are from the missing card at OpenSession.
+* Not tested: Windows, macOS, HANG, SD card, Dolphin GUI itself.
