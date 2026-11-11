@@ -78,3 +78,8 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * Plan: patches P1 (back-port), P2 (task WDT panic, fed by USB task), P3 (D+/D- low at boot), P4 (sdkconfig). Prove WDT with a CDC `HANG` command
   BEFORE any MTP test. Then raw libusb client (no mtp-detect first, no usbreset).
 * 01:55 running: sonnet FIX agent (does the above in that order).
+
+## 02:15 FIX agent (commits f99bfc3, 76da66b): details in Spike_Report.md MTP-P-10
+* P1, P2, P4 built; WDT PROVEN (HANG -> reset in 8 s -> host sees disconnect and 4041 again). ptp_probe.c written (compiles, not run).
+* P3 v1 broke the USB Serial/JTAG pad: board is INVISIBLE (port "not attached"). HUMAN NEEDED: hold BOOT + replug, then flash spike_force (v3, fixed, untested).
+  Recipe and test order: MTP-P-10.4. No MTP host test has run yet.
