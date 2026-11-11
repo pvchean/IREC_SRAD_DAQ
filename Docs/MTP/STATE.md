@@ -151,3 +151,9 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
   `cd .claude/worktrees/mtp && ~/.platformio/penv/bin/pio run -e daq_mtp_force -t upload --upload-port /dev/ttyACM0`; unplug 3 s, plug in WITHOUT BOOT.
   Then restart the hardware agent at step 3 (power-cycle proof, INFO/LOG DIAG, REBOOT, DL reflash, optional HANG, ptp_probe, libmtp).
 * Rule: never send DL to the old spike firmware. First daq_mtp_force flash needs BOOT.
+
+## 08:25 HARDWARE (orchestrator, inline, with the user's BOOT flash): daq_mtp_force FLASHED and WORKS so far
+* BOOT flash ok (watcher script; note ttyACM0 appears ~1 s after 303a:1001). Power-cycle proof PASS: 303a:1001 for ~10 s then 303a:4041. INFO: mode=files mounted=1 blocked_writes=0 nor_blocked=0 lost_pages=0, rec=0.
+  LOG: NAND mounted read-only (Path A), MTP storage id 0x00010001 name=DAQ total=122945536, DIAG heap_free=56904 min=53624, stack free TinyUSB=6804 mtp_vfs=7500 cmd=6560 main=1456 led=2120.
+* REBOOT PASS (clean 1001 -> 4041, no replug). DL PASS (1001 in ~1 s), reflash with no BOOT PASS, boots to files mode. The way back with no button is proven.
+* Board firmware now: daq_mtp_force. Next: ptp_probe stages 1-6 on the real NAND, mtp-detect last. LEAVE still forbidden. HANG test not yet done.
