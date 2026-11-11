@@ -8,6 +8,7 @@
 #ifndef MTP_VFS_H
 #define MTP_VFS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -22,5 +23,9 @@ void mtp_vfs_refresh(void);
 
 /* Total size that the MTP StorageInfo reports (the NAND capacity; the free space is 0). */
 uint64_t mtp_vfs_capacity(void);
+
+/* true if the SD card is mounted (it can try a mount). Takes the shim lock, so it never runs at the same time as an MTP read or a
+   refresh of the SD store. false before mtp_vfs_init(). For the cmd task (SDLS, CHUNK SD) in files mode. */
+bool mtp_vfs_sd_present(void);
 
 #endif

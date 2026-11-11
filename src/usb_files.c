@@ -4,7 +4,8 @@
              the pull fields in usj_pads_restore() (only when they differ from the reset default) and usb_pad_enable = 1 (the reset default).
      RULE 2: no pad or PHY register is written at a normal boot (power-on, esp_restart, DL, REBOOT, LEAVE) except mux_to_jtag().
      RULE 3: no crash-reset disconnect code (the spike flag SPIKE_P3 is not merged: it was off by default and unverified).
-   IN endpoints: CDC (notification + data) + MTP (interrupt + data) = 4 of 5. NEVER add another USB class or endpoint. */
+   IN endpoints: EP0 + CDC (notification + data) + MTP (interrupt + data) = 5 of 5 TX FIFOs (dwc2_esp32.h ep_in_count = 5 counts EP0).
+   REVIEW (MTP-V-7): no IN endpoint is free. NEVER add another USB class or endpoint. */
 #ifdef DAQ_MTP_USB
 
 #include <stdio.h>
@@ -12,6 +13,7 @@
 #include <stdarg.h>
 
 #include "driver/gpio.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -200,7 +202,17 @@ static void ring_dump(void)
         if (k >= sizeof line - 2U || c == '\n') { line[k] = 0; cdc_puts(line); k = 0; }
     }
     if (k) { line[k] = 0; cdc_puts(line); }
-    cdc_puts("END\r\n");
+    /* REVIEW (MTP-V-9): the stack and heap margins on real hardware (the host test cannot show them). Reads only. */
+    static const char *const names[] = { "TinyUSB", "mtp_vfs", "cmd", "main", "led" };
+    static char d[192];                        /* static: ring_dump() runs only in the main task (3584-byte stack) */
+    int n = snprintf(d, sizeof d, "DIAG heap_free=%u heap_min=%u stack_free_bytes:", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+    for (size_t i = 0; i < sizeof names / sizeof names[0] && n > 0 && n < (int)sizeof d; i++) {
+        TaskHandle_t h = xTaskGetHandle(names[i]);
+        if (h) { n += snprintf(d + n, sizeof d - (size_t)n, " %s=%u", names[i], (unsigned)uxTaskGetStackHighWaterMark(h)); }
+    }
+    cdc_puts(d);
+    cdc_puts("\r\nEND\r\n");
 }
 
 /* The OpenSession hook of the fork: make the file lists again. Runs in the USB task. */
@@ -223,11 +235,15 @@ static void usb_stack_start(void)
                                               .total_bytes = mtp_vfs_capacity(), .free_bytes = 0 };
     ESP_ERROR_CHECK(tinyusb_mtp_register_storage(&sc, NULL));
     tinyusb_config_t tc = TINYUSB_DEFAULT_CONFIG();
-    tc.task.size = 6144;                                  /* MTP-P-10 P4 */
+    tc.task.size = 8192;            /* REVIEW (MTP-V-4): was 6144 (MTP-P-10 P4). The MTP read runs fread -> VFS -> PFS read -> RS decode, plus a log line, in this task */
     ESP_ERROR_CHECK(tinyusb_driver_install(&tc));
     s_usb_up = true;
     const tinyusb_config_cdcacm_t cc = { .cdc_port = TINYUSB_CDC_ACM_0, .callback_rx = on_rx };
-    ESP_ERROR_CHECK(tinyusb_cdcacm_init(&cc));
+    if (tinyusb_cdcacm_init(&cc) != ESP_OK) {             /* REVIEW (MTP-V-10): D+ is up now. abort() would leave a stale device; drop D+ first */
+        ESP_LOGE(TAG, "CDC init failed: restart");
+        usb_files_prepare_restart();
+        esp_restart();
+    }
     cio_set_backend(&s_cdc_be);                           /* the cmd task now reads and writes the CDC port */
     ESP_LOGI(TAG, "files mode running (MTP + CDC)");
 }

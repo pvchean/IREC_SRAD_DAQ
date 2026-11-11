@@ -23,6 +23,9 @@
 #include "led_sr.h"
 #include "mtp_store.h"
 #include "mtp_store_pfs.h"
+#ifdef DAQ_MTP_USB
+#include "mtp_vfs.h"
+#endif
 #include "nau7802.h"
 #include "profile.h"
 #include "record.h"
@@ -41,7 +44,12 @@ static void cal_reply(const char *head);
 /* The SD card is mounted by sd_log.c in serial mode, and by mtp_store_sd.c in files mode (the same path /sdcard). */
 static bool sd_up(void)
 {
+#ifdef DAQ_MTP_USB
+    /* REVIEW (MTP-V-5): under the lock of the MTP shim. A direct present() could mount or unmount the card while the USB task reads it. */
+    if (files_mode_active()) { return mtp_vfs_sd_present(); }
+#else
     if (files_mode_active()) { const mtp_store_t *s = mtp_store_sd_get(); return s && s->present(); }
+#endif
     return sd_log_mounted();
 }
 

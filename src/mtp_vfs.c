@@ -93,8 +93,16 @@ static int v_open(void *ctx, const char *path, int flags, int mode)
     lock();
     kind_t k = lookup(path, &d, &idx);
     if (k == K_FILE) {
-        for (uint32_t i = 0; i < MAX_FD; i++) {
-            if (!s_fd[i].used) { s_fd[i] = (mfd_t){ true, (uint8_t)d, (uint16_t)idx, s_gen, 0 }; fd = (int)i; break; }
+        /* REVIEW (MTP-V-6): a free slot first; a slot of an old list (gen != s_gen) only when no slot is free. The refresh does not
+           free slots: a late close() of an old handle must not close a new file that got the same local fd. */
+        for (int pass = 0; pass < 2 && fd < 0; pass++) {
+            for (uint32_t i = 0; i < MAX_FD; i++) {
+                if (pass == 0 ? !s_fd[i].used : s_fd[i].gen != s_gen) {
+                    s_fd[i] = (mfd_t){ true, (uint8_t)d, (uint16_t)idx, s_gen, 0 };
+                    fd = (int)i;
+                    break;
+                }
+            }
         }
         if (fd < 0) { errno = ENFILE; }
     } else {
@@ -250,8 +258,7 @@ static void do_refresh(void)
         }
         ESP_LOGI(TAG, "refresh %s: store says %d, list has %u", d->dir, n, (unsigned)d->n);
     }
-    for (uint32_t i = 0; i < MAX_FD; i++) { s_fd[i].used = false; }       /* the files of the old session are closed */
-    s_gen++;
+    s_gen++;                 /* REVIEW (MTP-V-6): old handles now fail with EIO; their slots are freed by close() or reused by v_open() */
     unlock();
 }
 
@@ -278,6 +285,16 @@ void mtp_vfs_refresh(void)
 }
 
 uint64_t mtp_vfs_capacity(void) { return s_capacity; }
+
+/* REVIEW (MTP-V-5): the SD store allows one caller at a time. The cmd task (SDLS, CHUNK SD) asks through here, under the shim lock. */
+bool mtp_vfs_sd_present(void)
+{
+    if (!s_lock) { return false; }
+    lock();
+    bool p = s_dir[1].st && s_dir[1].st->present();
+    unlock();
+    return p;
+}
 
 esp_err_t mtp_vfs_init(void)
 {
