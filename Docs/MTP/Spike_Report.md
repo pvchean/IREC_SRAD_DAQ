@@ -214,3 +214,82 @@ a refusal after a data phase may trigger the P1b ERROR stall: then use `-r` to t
 ### MTP-P-10.6 State of the board at the end of this run
 Firmware on the flash: v1 (commit-equivalent of P1+P2+P3v1+P4, built before f99bfc3 changes to P3). It is the version with the pad bug, so the board
 needs BOOT-button recovery (10.4). Hardware tests after that: none done by this agent. Zero NAND writes.
+
+## MTP-P-11 Static review of the v3 USB Serial/JTAG pad safety (no hardware, 2026-11-11 ~03:00)
+Verdict: SAFE for every path that v3 (default build) can take, with two items marked UNVERIFIED (11.6). No board access was used. Zero NAND writes.
+Sources: IDF 6.1 in ~/.platformio/packages/framework-espidf/components (paths below are relative to it).
+
+### MTP-P-11.1 Register facts (from the IDF sources)
+* USJ pad control is `USB_SERIAL_JTAG.conf0` (`soc/esp32s3/register/soc/usb_serial_jtag_reg.h`): reset defaults `PAD_PULL_OVERRIDE=0`, `DP_PULLUP=1`,
+  `DP_PULLDOWN=0`, `DM_PULLUP=0`, `DM_PULLDOWN=0`, `USB_PAD_ENABLE=1`, `PHY_SEL=0`. (The USB_WRAP defaults differ: all pull bits 0.)
+* `usb_serial_jtag_ll_phy_disable_pull_override()` only clears the override bit. It does NOT restore the four pull values
+  (`esp_hal_usb/esp32s3/include/hal/usb_serial_jtag_ll.h:264-279`). This is how v1 left `dp_pullup=0, dp_pulldown=1, dm_pulldown=1` in conf0.
+* The PHY mux is in the RTC domain: `RTCCNTL.usb_conf.sw_hw_usb_phy_sel` and `sw_usb_phy_sel` (`usb_serial_jtag_ll.h:209-220`).
+  `sw_hw=1, sw_usb_phy_sel=0` = the internal PHY belongs to the USJ.
+* IDF itself gives the PHY back to the USJ with `phy_enable_external(false)` plus `phy_enable_pad(true)`
+  (`esp_hal_usb/usb_serial_jtag_hal.c:19-27`, `esp_driver_usb_serial_jtag/src/usb_serial_jtag.c:207-208`).
+* Reset classes (S3): panic, task WDT, interrupt WDT and `esp_restart()` end in `esp_rom_software_reset_cpu()` (`esp_system/port/soc/esp32s3/system_internal.c:esp_restart_noos`,
+  `esp_system/port/panic_handler.c:panic_restart`). A CPU reset keeps the clocks and the registers of USJ and USB_WRAP: `esp_system/port/soc/esp32s3/clk.c:236-245`
+  keeps the clock state for CPU0_SW / CPU0_MWDT / CPU0_RTC_WDT, and the USJ block is skipped by the reset list (clk.c:329).
+  This is the reason why the v1 pad state survived `esp_restart()`. Brown-out ends in `esp_rom_software_reset_system()` (`esp_hw_support/power_supply/brownout.c:80`), a core reset:
+  the digital peripherals restart, the RTC registers stay (comment in `esp_system/port/esp_system_chip.c:46`). A power-on resets everything.
+* The fork's `dcd_disconnect()` (`tools/mtp_spike/fork/esp_tinyusb/tinyusb/src/portable/synopsys/dwc2/dcd_dwc2.c:591-607`) writes the USB_WRAP pull override
+  (override=1, D+/D- pull-down) and DWC2 DCTL.SDIS. `tud_disconnect()` is therefore NOT a pure DWC2 action. It leaves USB_WRAP dirty. This state was present in the
+  REBOOT/DL path that worked on hardware (MTP-P-9.1: DL gave 303a:1001 in 4 s). It is harmless because the PHY is on the USJ then, and `tinyusb_driver_install()`
+  resets USB_WRAP (`esp_hal_usb/usb_wrap_hal.c:_usb_wrap_hal_init`) before the next use.
+* `tud_disconnect()` before `tinyusb_driver_install()` is NOT safe (`_usbd_rhport` is RHPORT_INVALID, `usbd.c:414,516`). v3 never calls it there.
+
+### MTP-P-11.2 Invariant of v3 (default build)
+v3 writes to `USB_SERIAL_JTAG.conf0` only: `phy_sel=0` (reset default), `usb_pad_enable=1` (reset default), and the four pull fields plus the override bit,
+but ONLY when `usj_pads_restore()` finds a value that differs from the reset default, and then it writes the reset default. So conf0 is at the reset default after every
+boot step of v3, whatever path ran before. The default build never writes USB_WRAP, DWC2 or `RTCCNTL.usb_conf` at boot, except `mux_to_jtag()`
+(RTC `sw_hw=1, sw_usb_phy_sel=0`; this line existed in the build that was proven at 01:3x, commit a6004ca).
+
+### MTP-P-11.3 Proof table (state at the first 10 s of the next boot, the grace window)
+| Path | What runs | conf0 at app_main | RTC mux | Grace window | Source / status |
+|---|---|---|---|---|---|
+| Power-up | chip reset, all registers at reset default; `usj_pads_restore()` reads conf0: clean, writes nothing; `mux_to_jtag()` | default | USJ (sw) | OK, USJ drives D+ pull-up | reg.h defaults. Same as the proven build. |
+| `esp_restart()` (REBOOT) | `tud_disconnect()` (USB_WRAP dirty, DWC2 SDIS), 500 ms, `mux_to_jtag()`, restore (no-op), `esp_restart()`, CPU reset | default (v3 never changed it) | USJ | OK. USB_WRAP dirty but unused | Same writes as a6004ca (proven) + a no-op. The `usb_shutdown` handler of v1/v2 is removed (it was unproven and redundant). |
+| `DL` | same as REBOOT, then `RTC_CNTL_OPTION1 = FORCE_DOWNLOAD_BOOT` before the restart. ROM download mode uses the USJ | default | USJ | ROM: 303a:1001, esptool works | Same as a6004ca (proven: 4 s). v1 failed here only because conf0 was dirty. |
+| Panic / `abort()` / TWDT / INT WDT | CPU reset, no cleanup code runs. Mux and DWC2 stay as in files mode | default (v3 never changed it) | still OTG until `mux_to_jtag()` runs at the start of app_main, then USJ | Pad works (USJ owns it, pull-up on). The HOST may keep a stale device 4041 (D+ never dropped), so 1001 may not show: replug (power cycle) gives a clean boot | clk.c:236-245 (state kept). With `-DSPIKE_P3=1` the disconnect is tried (11.5). |
+| RTC WDT (`esp_restart_noos` arms it 1 s) | CPU or system reset, same as above | default | as above | as above | `system_internal.c:esp_restart_noos` |
+| Brown-out | core reset (`brownout.c:80`): digital peripherals restart, RTC registers stay | default (digital reset) or default (v3 never changed it) | RTC bits may stay OTG, `mux_to_jtag()` fixes them in app_main | Pad works. USB power is probably gone anyway | UNVERIFIED which registers the core reset clears. Both cases give default conf0. |
+| Stale v1 state (board flashed before power cycle) | `usj_pads_restore()` repairs conf0 | dirty then repaired | USJ | OK after ~0.3 to 0.5 s of IDF start. ROM and the bootloader run with the dirty pad (they do not use USB) | A power-on resets conf0 anyway. |
+No v3 path writes a non-default pull value into conf0. Therefore v3 cannot kill the USJ pad by the v1 mechanism.
+
+### MTP-P-11.4 Code changes (tools/mtp_spike/src/main.c, platformio.ini)
+* `usj_pads_restore()`: now reads conf0 first. Clock off or all fields at default: it writes nothing. Else it writes the reset default and sets `usb_pad_enable=1`. It returns true if it repaired something.
+* It runs FIRST in `app_main()`, before the reset reason, P3 and `mux_to_jtag()`. It also runs before restart in the REBOOT and DL path (no-op there).
+  Order check: the ROM and the second stage bootloader do not write conf0 (`bootloader_support/src/bootloader_console.c`: USJ console = ROM output only), so there is nothing to do before app_main. A dirty state lives ~0.5 s longer than necessary only.
+* P3 v1 (`usb_force_disconnect`, pull override on USJ and USB_WRAP at every boot) is DELETED. `USB_P3_ALWAYS` is deleted. New flag `SPIKE_P3`, default 0 (env `spike_force_p3` sets it to 1).
+  With `SPIKE_P3=1` and a crash reset only, `crash_disconnect()` replays the proven `dcd_disconnect()` writes (USB_WRAP override + DWC2 DCTL.SDIS, 500 ms), and only when the OTG clock is on
+  and the RTC mux still maps the PHY to the OTG. It never writes conf0 (the register that killed the pad).
+* `usb_shutdown` handler and its `esp_register_shutdown_handler()` call are removed (unproven, and the REBOOT/DL path already does the same before it calls `esp_restart()`).
+* The boot log (CDC `LOG`) shows the reset reason, whether the pads were dirty, and the P3 flag.
+* Not changed: the REBOOT and DL path (identical to the proven a6004ca path plus a no-op), P1, P2, P4, HANG, ABORT.
+* Builds: `pio run -e spike_force`, `-e spike`, `-e spike_force_p3` all SUCCESS (penv pio). Not flashed.
+
+### MTP-P-11.5 Is P3 needed? Why it is off
+It is not needed for safety. Without P3, a crash (WDT) leaves the host with a stale device (D+ never dropped), so the host will not show 1001 or 4041 again until a replug.
+The pad is fine, the chip runs, and a plain replug (power-on) gives a clean boot and a 10 s grace window. P3 only saves that replug in the HANG test. Its safety rests on a replica of
+writes that already ran on hardware, but running it at boot after a crash is new, so it is UNVERIFIED and off.
+
+### MTP-P-11.6 Remaining uncertainty
+1. UNVERIFIED: why v1 killed the pad. Best explanation: stale conf0 values matter even with `pad_pull_override=0`. v3 never leaves them, so this does not matter for v3. If the pad still dies, the cause is something else: STOP, do not continue.
+2. UNVERIFIED: brown-out reset scope (which registers a core reset clears). Both outcomes are covered (conf0 default either way).
+3. UNVERIFIED: `SPIKE_P3=1` (does the RTC mux still say OTG at app_main after a crash, does the host see the disconnect). Failure is benign (no write happens, or the host stays stale).
+4. UNVERIFIED: a leftover USB_WRAP override does not matter while the PHY is on the USJ. It held in the proven REBOOT/DL path (a6004ca), but not for the very first boot after v1.
+5. After DL and a manual esptool flash the next boot depends on `FORCE_DOWNLOAD_BOOT` being cleared by esptool or the power cycle. This worked at 01:3x. If the board boots into download mode again, a power cycle clears it.
+6. The files-mode path itself (MTP, TinyUSB hang) is not in scope here: a hang is recovered by the 8 s TWDT, then a replug (P3 off).
+
+### MTP-P-11.7 Recovery and test order (human, then the next agent). Stop at the first surprise. Never run DL, REBOOT or a flash after step 3 until steps 1 to 3 pass.
+Human:
+1. Hold BOOT, plug the USB cable in. `lsusb` must show `303a:1001`. (Full power loss needed: the v1 pad state is cleared by the power-on. Unplug first, wait 3 s.) Release BOOT after the flash command starts.
+2. `cd tools/mtp_spike && ~/.platformio/penv/bin/pio run -e spike_force -t upload --upload-port /dev/ttyACM0`. Then unplug, wait 3 s, plug in WITHOUT BOOT. Do not use `usbreset`.
+Agent (after the human says the board is plugged in, no BOOT):
+3. Power-cycle proof: within 10 s `lsusb` shows `303a:1001` (grace). After 10 s `303a:4041`. CDC `INFO` answers. Then CDC `LOG`: the line "USJ pads were clean" (a "DIRTY" line is also fine for the first boot, but report it).
+   If 1001 is missing in the grace window: STOP. Ask the human for BOOT + replug.
+4. `DL`: expect `303a:1001` in about 4 s. Flash the same `spike_force` again through it (proves the way back). Then power cycle once (step 3 again).
+5. `REBOOT`: expect disconnect, then 1001 for 10 s, then 4041. Check `LOG` ("reset reason 11" or similar = software, "pads clean").
+6. `HANG` (TWDT test, P3 off): the board resets after 8 s. The host may keep a stale 4041. That is expected. Ask the human for a replug (or skip this step; the WDT proof of MTP-P-10.2 stands). Only after steps 3 to 5 passed, and only if the human is at the board, flash `-e spike_force_p3` through `DL` and repeat `HANG`: the host should see a disconnect and 4041 again. If not: go back to `spike_force`.
+7. MTP host tests, with `ptp_probe` only (see MTP-P-10.4 item d). Never `mtp-detect` first, never `usbreset`.

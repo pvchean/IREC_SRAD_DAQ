@@ -18,6 +18,8 @@
 #include "hal/usb_wrap_ll.h"
 #include "soc/usb_wrap_struct.h"
 #include "esp_rom_sys.h"
+#include "soc/system_reg.h"
+#include "soc/usb_serial_jtag_struct.h"
 #include "tinyusb_default_config.h"
 #include "tinyusb.h"
 #include "tusb.h"
@@ -60,29 +62,55 @@ static void ring_dump(void)
     cdc_puts("END\r\n");
 }
 
-/* Give the USB pads back to USB Serial/JTAG (the mux lives in the RTC domain, a reset may not undo it). */
-static void mux_to_jtag(void) { usb_serial_jtag_ll_phy_enable_external(false); }
-static void usj_pads_restore(void);
+/* ---- USB Serial/JTAG pad safety (MTP-P-11). Read Docs/MTP/Spike_Report.md MTP-P-11 before you change anything here. ----
+ * RULE 1: this file NEVER leaves USB_SERIAL_JTAG.conf0 with a non-default pull value. The only conf0 writes are
+ *         phy_sel = 0 (mux_to_jtag), the pull fields (usj_pads_restore, only when they differ from the reset default) and
+ *         usb_pad_enable = 1 (the reset default). The v1 build wrote dp_pullup=0 / dp_pulldown=1 to conf0 at every boot: the pad died.
+ * RULE 2: no pad or PHY register is written at a normal boot (power-on, esp_restart, DL, REBOOT).
+ * RULE 3: crash-reset disconnect (SPIKE_P3) is OFF by default. It never writes conf0. */
+static void mux_to_jtag(void) { usb_serial_jtag_ll_phy_enable_external(false); }     /* RTC mux + USJ.phy_sel = USJ owns the PHY */
 
-/* MTP-P-10 P3: after a panic or watchdog reset the pad pull-up of the old session stays on, so the host sees no reboot.
- * Pull D+ and D- low for a while. LESSON (v1, 02:03): the USB Serial/JTAG registers are NOT reset by a software reset.
- * Leaving dp_pullup=0 / dp_pulldown=1 in conf0 killed the pad for ever (grace invisible, CDC DL left the board without a
- * pull-up, host port "not attached", human replug needed). So ALWAYS write the normal values back before leaving. */
-static void usj_pads_restore(void)
+static bool usj_clock_on(void)   /* same test as usb_serial_jtag_ll_module_is_enabled(), without the RCC atomic macro */
 {
+    return (REG_READ(SYSTEM_PERIP_CLK_EN1_REG) & SYSTEM_USB_DEVICE_CLK_EN) && !(REG_READ(SYSTEM_PERIP_RST_EN1_REG) & SYSTEM_USB_DEVICE_RST);
+}
+static bool usj_pads_clean(void)  /* true = conf0 pull fields and pad enable are at the TRM reset default */
+{
+    return !USB_SERIAL_JTAG.conf0.pad_pull_override && USB_SERIAL_JTAG.conf0.dp_pullup && !USB_SERIAL_JTAG.conf0.dp_pulldown &&
+           !USB_SERIAL_JTAG.conf0.dm_pullup && !USB_SERIAL_JTAG.conf0.dm_pulldown && USB_SERIAL_JTAG.conf0.usb_pad_enable;
+}
+/* Idempotent. Clean state or clock off: it writes NOTHING. Dirty state (a stale value from an older firmware): it writes the reset
+ * default (dp_pu=1, others 0, override off, pad on). Returns true if it had to repair something. */
+static bool usj_pads_restore(void)
+{
+    if (!usj_clock_on() || usj_pads_clean()) { return false; }
     const usb_serial_jtag_pull_override_vals_t n = { .dp_pu = true, .dm_pu = false, .dp_pd = false, .dm_pd = false };
-    usb_serial_jtag_ll_phy_enable_pull_override(&n);       /* sane register values first */
+    usb_serial_jtag_ll_phy_enable_pull_override(&n);       /* sane register values first, override on */
     usb_serial_jtag_ll_phy_disable_pull_override();        /* then give the pad back to the controller */
+    usb_serial_jtag_ll_phy_enable_pad(true);
+    return true;
 }
-static void usb_force_disconnect(uint32_t ms)
+
+#ifndef SPIKE_P3
+#define SPIKE_P3 0     /* 1 = after a crash reset, make the host see a disconnect (see crash_disconnect). Default OFF. UNVERIFIED on hardware. */
+#endif
+#if SPIKE_P3
+/* Replica of dcd_disconnect() of the fork (the same writes that the REBOOT/DL path already runs, proven in MTP-P-9.1): USB_WRAP pull override
+ * (D+ pull-down) and DWC2 DCTL.SDIS. It touches ONLY when the USB OTG clock is on AND the RTC mux still maps the PHY to the OTG (stale state of
+ * the crashed session). It never writes USB_SERIAL_JTAG.conf0. The USB_WRAP override stays on afterwards, as after tud_disconnect() in the
+ * proven path; the PHY goes to the USJ next, and tinyusb resets USB_WRAP before it uses it again. */
+static void crash_disconnect(void)
 {
-    usb_serial_jtag_ll_phy_enable_external(false);         /* the pads belong to the USJ PHY now (also after a panic) */
-    const usb_serial_jtag_pull_override_vals_t j = { .dp_pu = false, .dm_pu = false, .dp_pd = true, .dm_pd = true };
-    usb_serial_jtag_ll_phy_enable_pull_override(&j);
-    esp_rom_delay_us(ms * 1000);
-    usj_pads_restore();
+    const bool otg_clk = (REG_READ(SYSTEM_PERIP_CLK_EN0_REG) & SYSTEM_USB_CLK_EN) && !(REG_READ(SYSTEM_PERIP_RST_EN0_REG) & SYSTEM_USB_RST);
+    const bool mux_otg = RTCCNTL.usb_conf.sw_hw_usb_phy_sel && RTCCNTL.usb_conf.sw_usb_phy_sel;
+    if (!otg_clk || !mux_otg) { return; }
+    usb_wrap_otg_conf_reg_t c = USB_WRAP.otg_conf;
+    c.pad_pull_override = 1; c.dp_pullup = 0; c.dp_pulldown = 1; c.dm_pullup = 0; c.dm_pulldown = 1;
+    USB_WRAP.otg_conf = c;
+    REG_SET_BIT(0x60080000UL + 0x804, BIT(1));     /* DWC2 DCTL.SDIS (soft disconnect) */
+    vTaskDelay(pdMS_TO_TICKS(500));                        /* as long as the proven REBOOT path */
 }
-static void usb_shutdown(void) { tud_disconnect(); esp_rom_delay_us(500000); }
+#endif
 
 static volatile int s_action;     /* 1 = REBOOT, 2 = DL */
 static char s_line[64]; static int s_ll;
@@ -126,7 +154,6 @@ static void files_mode(void)
     ESP_ERROR_CHECK(tinyusb_driver_install(&tc));
     const tinyusb_config_cdcacm_t cc = { .cdc_port = TINYUSB_CDC_ACM_0, .callback_rx = on_rx };
     ESP_ERROR_CHECK(tinyusb_cdcacm_init(&cc));
-    esp_register_shutdown_handler(usb_shutdown);
     ESP_LOGI(TAG, "files mode running (MTP + CDC)");
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -146,14 +173,11 @@ static void files_mode(void)
 
 void app_main(void)
 {
-    /* P3 runs only after a crash/watchdog reset (the pull-up is stale then). Build with -DUSB_P3_ALWAYS=1 to run it at every boot. */
-    esp_reset_reason_t rr = esp_reset_reason();
-#ifndef USB_P3_ALWAYS
-#define USB_P3_ALWAYS 0
+    const bool pads_were_dirty = usj_pads_restore();    /* FIRST, always: cleans a stale pad state of an older firmware (no write if clean) */
+    const esp_reset_reason_t rr = esp_reset_reason();
+#if SPIKE_P3
+    if (rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT) { crash_disconnect(); }
 #endif
-    if (USB_P3_ALWAYS || rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT) {
-        usb_force_disconnect(200);
-    }
     mux_to_jtag();                                   /* always start on the USB Serial/JTAG */
     s_old_vprintf = esp_log_set_vprintf(ring_vprintf);
     const gpio_config_t gc = { .pin_bit_mask = 1ULL << MODE2_PIN, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE };
@@ -165,6 +189,7 @@ void app_main(void)
 #else
     bool files = (lvl == 0);
 #endif
+    ESP_LOGI(TAG, "reset reason %d, USJ pads were %s, P3 %d", (int)rr, pads_were_dirty ? "DIRTY (repaired)" : "clean", SPIKE_P3);
     ESP_LOGI(TAG, "boot: gpio2=%d files=%d force=%d", lvl,
 #ifdef SPIKE_FORCE_FILES
              files, 1
