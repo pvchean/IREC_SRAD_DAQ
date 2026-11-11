@@ -70,3 +70,11 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * Rule added: before any host-side MTP test, the firmware must have a hardware watchdog that resets the chip when the USB stack hangs.
 * 01:45 started: OPUS static review (no hardware): Docs/MTP/Opus_Hint.md (root causes, test plan, watchdog self-recovery).
 * Ledger window A+: haiku 43k, spike-test 120k (est. total since 00:00: ~1.2M agent tokens).
+
+## 01:55 Opus hint (commit 23186a2, static review). Board is back (user replugged at ~01:49): 303a:4041, spike_force, files mode.
+* Likely cause: TinyUSB 0.21.0 mtp_device.c recovery bugs (DEVICE_RESET status stage never answered, dropped ZLP/wrong-type packet leaves
+  the bulk pipe dead, no busy check -> assert); debug level 1 assert prints to a dead console; dcd_dwc2 edpt_disable loops without timeout.
+  Ruled out: 64 B vs 4096 B buffer, interrupt EP, FIFO size, VFS locks. IN endpoints at the limit (5): never add a 6th.
+* Plan: patches P1 (back-port), P2 (task WDT panic, fed by USB task), P3 (D+/D- low at boot), P4 (sdkconfig). Prove WDT with a CDC `HANG` command
+  BEFORE any MTP test. Then raw libusb client (no mtp-detect first, no usbreset).
+* 01:55 running: sonnet FIX agent (does the above in that order).
