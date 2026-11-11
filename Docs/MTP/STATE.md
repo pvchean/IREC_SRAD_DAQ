@@ -143,3 +143,11 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * Window B agent tokens so far: ~0.85M (host harness 386k, opus review 190k + orchestrator).
 
 ## 07:37 BOARD BACK (user reconnected): 303a:4041 'IREC DAQ', /dev/ttyACM0 (a TinyUSB firmware is running, probably spike v1/v3). Started sonnet HARDWARE agent (Hardware_Report.md): INFO, flash daq_mtp_force via DL, grace proof, REBOOT, DL, optional HANG, ptp_probe 1-6 on real NAND, then libmtp. LEAVE forbidden.
+
+## 07:50 HARDWARE agent stopped at step 2 (~60k tokens, commit fbe2920; Hardware_Report.md MTP-HW-1..3)
+* Board was running the OLD spike (INFO: "spike files mode"). CDC `DL` on it dropped the board again (no 303a). My plan was wrong: DL on spike v1/v3 is NOT safe (known from the FIX agent report). 
+* daq_mtp_force is built and ready (host test 8427/8427, nm T for the 6 callbacks, RAM 64.7 %, flash 27.7 %). Nothing flashed.
+* NEEDS HUMAN: unplug 3 s; hold BOOT, plug in; `lsusb` shows 303a:1001; flash:
+  `cd .claude/worktrees/mtp && ~/.platformio/penv/bin/pio run -e daq_mtp_force -t upload --upload-port /dev/ttyACM0`; unplug 3 s, plug in WITHOUT BOOT.
+  Then restart the hardware agent at step 3 (power-cycle proof, INFO/LOG DIAG, REBOOT, DL reflash, optional HANG, ptp_probe, libmtp).
+* Rule: never send DL to the old spike firmware. First daq_mtp_force flash needs BOOT.
