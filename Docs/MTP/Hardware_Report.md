@@ -50,3 +50,54 @@ Note: `SendObjectInfo` refusal takes 2 s in the probe because the probe waits fo
 * Result from `LIST`: file id 2, 173 pages, size 324548 bytes (323696 bytes of records). `ingested=323696 dropped=0`.
 * Bytes written to the NAND: about 173 pages x 2048 B = 354 KB = 2.8 Mbit. That is 0.6 % of the 500 Mbit limit. The file stays on the NAND (no delete without a format).
 * Total NAND writes of the MTP task: 2.8 Mbit (this run only). Before this run: 0.
+
+## MTP-HW-6 Read-only soak, desktop file manager, concurrency, DIAG (2026-11-11 08:35-08:55)
+Board: `daq_mtp_force`, files mode, `/dev/ttyACM0` (303a:4041). Zero NAND writes. No HANG, LEAVE, REC ON, DL or REBOOT was sent. Nothing was flashed.
+The NAND holds one file: `NAND_F00002D4.BIN`, 323696 bytes, CRC32 f3d49e4f. Helper scripts are in the agent scratchpad (`soak.sh`, `poll.py`, `logtime.py`), not in the repository.
+
+### MTP-HW-6.1 Desktop file manager path (task 1): NOT TESTABLE on this PC
+* `gio mount -l` shows no mount. `gio list mtp://` returns "Operation not supported". The packages `gvfs` and `gvfs-mtp` are not installed.
+* `jmtpfs` and `simple-mtpfs` are not installed. Nothing was installed.
+* The KDE path exists (`kioclient` 6.8.2, `kio-extras` with the `kmtpd` module, Dolphin). `kioclient ls mtp:/` lists no device. `kmtpd` reports 0 devices (D-Bus `listDevices` returns an empty array).
+* Cause on the PC (not in the firmware): `kmtpd` uses Solid `PortableMediaPlayer`. Solid needs the udev properties `ID_MTP_DEVICE` and `ID_MEDIA_PLAYER`. The udev database of the board has neither (`/run/udev/data/c189:62`). Solid shows interface 1-1:1.2 as "Camera".
+* `/usr/lib/udev/mtp-probe` returns 1 for the board (run by hand, and the journal shows "was an MTP device" at 08:29:42, twice). `/dev/libmtp-1-1` exists. So the probe accepts the board, but the property is missing from the database. The reason is not found (probably the second udev event, "bind", rewrites the database entry; not proved).
+* Result: the file copy through a desktop file manager is untested. A replug (new "add" event) may fix the property. The user must try this, or use Dolphin, after a replug.
+
+### MTP-HW-6.2 Soak (task 2): PASS
+| Item | Result |
+| :-- | :-- |
+| Probe `-s 5` (open, list, 2 full reads, 20 random reads, close), 30 runs, with the CDC port given to the probe | 30 of 30 PASS, 0 failures |
+| Time per run | 7.57 to 7.59 s (most of it is the 0.7 s pauses of the probe between steps) |
+| Full read speed (60 reads) | min 714.4 KB/s, max 717.6 KB/s. CRC32 f3d49e4f every time. |
+| Slowest random read (65536 B) | 98.3 ms |
+| `mtp-getfile 3`, 5 copies | 5 of 5: size 323696, CRC32 f3d49e4f. 0.85 to 0.88 s each (about 360 KB/s, includes session open and refresh). |
+| CDC `INFO` after every run (35 times) | always `mode=files mounted=1 blocked_writes=0 nor_blocked=0 lost_pages=0` |
+| Total time (30 runs, 5 copies, 35 INFO) | 339.6 s |
+No error, no stall, no reconnect. The port stayed 303a:4041 all the time.
+
+### MTP-HW-6.3 Concurrency: CDC INFO every 200 ms during an MTP read (task 3): PASS
+* Method: one process sent `INFO` every 200 ms for 45 s (225 requests). Six `ptp_probe -s 4` runs (two full reads each) ran at the same time.
+* INFO: 225 of 225 answered, all with blocked_writes=0 nor_blocked=0 lost_pages=0. Latency min 50.2, median 50.5, max 52.0 ms (this is the 50 ms read poll of the script, so the true latency is shorter). No INFO was late during a read.
+* MTP: 6 of 6 PASS, CRC32 f3d49e4f. Speed 714.4 to 717.4 KB/s. Without INFO: 714.4 to 717.6 KB/s. No measurable change.
+* Limit: INFO is a short reply. A large CDC stream (for example LOG during a read) was not tested at the same time.
+
+### MTP-HW-6.4 LOG and the DIAG line (task 4)
+* Result: the DIAG line is present. After the soak and after the concurrency test the LOG shows it as the last line before `END`.
+`DIAG heap_free=56692 heap_min=49524 stack_free_bytes: TinyUSB=5540 mtp_vfs=5884 cmd=6304 main=1376 led=2120`
+| Value | After boot (HW-4) | After soak and concurrency |
+| :-- | :-- | :-- |
+| heap_free | 56904 | 56692 |
+| heap_min | 53624 | 49524 (about 4 KB used at the worst point during MTP) |
+| TinyUSB task free stack (size 8192) | 6804 | 5540 |
+| mtp_vfs free stack | 7500 | 5884 |
+| cmd free stack | 6560 | 6304 |
+| main free stack | 1456 | 1376 (the lowest margin; main stack is 3584 B per `usb_files.c`) |
+| led free stack | 2120 | 2120 |
+* Stack use is stable and small after 30+ sessions. The lowest margin is the main task (1376 bytes). It is not caused by MTP reads.
+* Why the DIAG line was missing in the earlier read: it could not be reproduced. In 8 reads (delays 0 to 1.5 s before the host read) the full dump arrived: about 6300 bytes in 0.27 s, DIAG and `END` at the end. `ring_dump()` in `src/usb_files.c` always writes the ring first, then the DIAG line, then `END`. The ring (6144 B, `RING_SZ`) wraps without harm, and it holds only the last 45 lines because the MTP trace lines (`tinyusb_mtp_transport: MTP trace ...`) are at level INFO and fill it fast. DIAG is built after the ring, so a wrap cannot remove it.
+* Most probable cause of the earlier miss: the reader stopped before the end (a 2 s limit with a slow line reader, or `head`/`tail` on the output), or the reply was mixed with the CDC INFO output of the probe. Not proved. Advice: read until the line `END`, not for a fixed time.
+* Side note: the MTP trace at INFO level (every command, two lines each) uses the ring and the CDC time for no gain in a flight build. Lower the level for the release build (not changed here).
+
+### MTP-HW-6.5 Problems and open items
+* No problem with MTP, CDC or the board in any test. No anomaly. The board is still in files mode, mounted read only.
+* Open: the desktop file manager (MTP-HW-6.1). Windows and macOS. HANG (crash recovery). SD card. `main` stack margin 1376 bytes.
