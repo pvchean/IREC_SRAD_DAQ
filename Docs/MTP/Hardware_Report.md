@@ -118,3 +118,45 @@ No error, no stall, no reconnect. The port stayed 303a:4041 all the time.
 * `INFO` after every action (3 copies, write, delete): mode=files blocked_writes=0 nor_blocked=0 lost_pages=0. The refusals are counted by the MTP layer, not by the NAND layer, so blocked_writes stays 0.
 * LOG after the KDE session (read to `END`): no stall, no protocol error, no reconnect. Only the expected refusal line. The SD errors (`sdmmc_init_ocr 0x107`) are from the missing card at OpenSession.
 * Not tested: Windows, macOS, HANG, SD card, Dolphin GUI itself.
+
+## MTP-HW-8 Crash recovery test: CDC `HANG` (2026-11-11 09:23 to 09:31, user at the PC)
+Verdict: PASS. 5 of 5 crash cycles recovered with no human, no replug and no stale device. Risk MTP-V-1 did NOT appear on this PC.
+Build: `daq_mtp_force` (commit 333c862 code, files mode, MTP + CDC). NAND: one synthetic file `NAND_F00002D4.BIN`, 323696 B, CRC32 f3d49e4f. NAND writes: zero.
+`HANG` blocks the TinyUSB task. The task watchdog (8 s, panic, silent reboot) must reset the chip. Host: Linux 7.2.11, xHCI, kiod6 (KDE) holds the MTP interface.
+Method: `lsusb` and `/dev/ttyACM*` every 0.5 s from 5 s before to 45 s after `HANG`. Kernel times come from `journalctl -k`. Times are seconds after the `HANG` line.
+
+### MTP-HW-8.1 T1: HANG while idle (3 cycles)
+| Cycle | Host sees `USB disconnect` | New 303a:1001 | 1001 -> 4041 (second disconnect) | New 303a:4041 + ttyACM | CDC after |
+| :-- | :-- | :-- | :-- | :-- | :-- |
+| 1 | about 8.7 (between samples +8.70 and +9.22) | about 9.1 | about 20.2 | about 20.4 (09:23:59.82) | INFO and LOG OK |
+| 2 (HANG 09:25:02.675) | 8.72 | 9.13 | 20.07 | 20.44 | INFO and LOG OK |
+| 3 (HANG 09:26:10.887) | 8.72 | 9.14 | 20.07 | 20.46 | INFO and LOG OK |
+* The host saw a real disconnect each time. The device gets a new address each time. The old address never stays: there is no stale 4041. The board is invisible for less than 0.3 s.
+* In the 11 s window (1001) the grace countdown runs. Then TinyUSB starts and 4041 appears. Total time with no MTP: about 20.5 s.
+* LOG after each crash (read to END): `usb_files: reset reason 6, USJ pads were clean` (6 = `ESP_RST_TASK_WDT`). Then `NAND mounted read only: refused writes nand+nor=0, NOR refused=0`, then `USB MTP starts in 10 s` to `1 s`, then `files mode running (MTP + CDC)`.
+* DIAG after the cycles: `heap_free=54516 heap_min=51576` (same as before the test). Free stack: TinyUSB=6628 mtp_vfs=5916 cmd=6560 main=3408 led=2120.
+* INFO after each cycle: `mode=files rec=0 mounted=1 index=1 blocked_writes=0 nor_blocked=0 lost_pages=0`. The read-only PFS mount works again after each crash. The file is still listed (`refresh NAND: store says 1, list has 1`).
+* DL and flash after the crash cycles: CDC `DL` gave 303a:1001 in about 1.5 s. `pio run -e daq_mtp_force -t upload --upload-port /dev/ttyACM0` wrote 1162640 B, hash verified, board back as 4041 about 12 s after the flash ("reset reason 11" = USB download reset). The way back with no BOOT button still works after crash resets.
+* Kernel log (09:23 to 09:31): only the expected `USB disconnect` / `new full-speed USB device` / `New USB device found` lines. No xhci error, no `device not accepting address`, no `reset`, no `cdc_acm` error.
+
+### MTP-HW-8.2 T2: HANG during an MTP read (2 cycles)
+Reader: `kioclient5 copy` of the NAND file in a loop (0.6 s per copy, 0.05 s gap). `HANG` was sent while a copy was running (the copy started 0.25 to 0.37 s before `HANG`).
+| Cycle | Reader result | Host disconnect | 1001 | 4041 | First good read after |
+| :-- | :-- | :-- | :-- | :-- | :-- |
+| 1 (HANG 09:28:59.905) | The running copy stalled 8.4 s, then failed: `Could not read file` with 180276 B written (partial) | 8.72 | 9.12 | 20.43 | at 20.5 (about 0.1 s after 4041): CRC f3d49e4f, 323696 B |
+| 2 (HANG 09:30:11.404) | Same: stalled, failed with 49204 B written (partial) | 8.72 | 9.14 | 20.46 | at about 20.5: CRC f3d49e4f |
+* The reader does NOT time out by itself: it waits until the host sees the disconnect (about 8.7 s), then gets an error. The partial file is left on disk. An application must delete it (its CRC differs).
+* From the disconnect to 4041 the reader fails fast, about 0.14 s per try (61 failed tries per cycle: no MTP device, or only the 1001 serial device).
+* kiod6 found the new MTP device by itself. The first copy after 4041 worked with no restart of KDE and no user action. All successful reads of both cycles (56 and 56 copies) have CRC f3d49e4f. A final read after the tests: CRC f3d49e4f.
+* Host bus health: `lsusb` listed all other devices (HDMI card, fingerprint, Bluetooth, camera) in every sample. The line count was constant (13), 12 only in the 0.5 s gap when the board was off the bus. No xhci error in the kernel log.
+* After the cycles: INFO `blocked_writes=0 nor_blocked=0 lost_pages=0 mounted=1`. LOG: `reset reason 6`, DIAG `heap_free=54452 heap_min=47476`, TinyUSB stack free 5796 (the lowest value seen, because it ran the read).
+
+### MTP-HW-8.3 T3 (HANG during OpenSession): not done
+The OpenSession refresh lasts about 0.05 s. A timed hit is not repeatable with these tools. T2 shows the same host path (a blocked USB task in a session).
+
+### MTP-HW-8.4 Verdict and risk for the DAQ
+* PASS: no human needed in 5 of 5 cycles (idle and during a read). Recovery is automatic: reset 8.7 s after the hang, 1001 for 11 s (flash window), 4041 after about 20.5 s in total.
+* MTP-V-1 (stale device after a crash): not reproduced. The host saw a disconnect at the reset each time. Reason not proven. Likely the reset or the bootloader drops D+ for a short time. The fix MTP-V-1.3 is NOT needed on this evidence. Do not apply it now: it changes crash-path code and needs its own hardware proof.
+* What a hang costs in files mode: about 20.5 s with no USB. An MTP copy in progress fails (partial file); the user must start it again. No NAND data is touched (read only, `blocked_writes=0`).
+* Not proven: (1) other crash types (panic by abort, stack overflow, interrupt watchdog): only the task-watchdog path was tested, because only `HANG` exists in this build. (2) Other hosts: Windows, macOS, a USB hub, a different xHCI chip may keep a stale device. (3) A hang in serial/recording mode (`daq`): HANG is not in that build, and the recovery there is not tested. (4) A hang in the middle of a bulk transfer on the host side was tested only with kioclient5/libmtp-like KDE access, not with the raw `ptp_probe`.
+* Files: timelines and read logs are in the scratchpad (`hang/t1a..t2b.timeline`, `*.reads`), not committed.
