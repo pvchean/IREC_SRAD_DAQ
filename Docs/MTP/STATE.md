@@ -26,3 +26,7 @@ VID/PID 303A/4041 ok. Leave files mode by CDC `REBOOT` / `DL` (ROM download). ma
 Open: does PFS mount write to NAND? (storage agent checks). `daq_mtp` build must disable recording before any flash of the real firmware.
 
 Build: use ~/.platformio/penv/bin/pio (system pio lacks intelhex). Keep NAND_/uSD_ prefixes. Custom no-format NOR HAL wanted.
+
+## Checkpoint 00:3x (window A ended early: user reported 5 % left; orchestrator had no usage meter and was late)
+Agents told to pause and write Spike_Report.md / Boot_Integration.md. Window A total agent tokens ~ 480k + spike/integration (unknown, see their reports).
+Resume: a session cron fires at 06:23 and starts fresh agents from these files. It lives only while the VS Code session stays open.
