@@ -25,3 +25,28 @@ Zero NAND writes. No MTP command was sent. `LEAVE`, `REC ON`, `usbreset`, `mtp-d
 
 Steps 3 to 8 (power-cycle proof, INFO/LOG DIAG, REBOOT, DL reflash, HANG, ptp_probe, libmtp) were not run.
 Nothing of the real firmware has run on hardware yet.
+
+## MTP-HW-4 Orchestrator run, 2026-11-11 08:20-08:33 (the user held BOOT for the first flash)
+Board: DAQ with NAND (usable_blocks 1019), no SD card. Firmware: `daq_mtp_force` (commit of this branch at that time).
+| Step | Result |
+| :-- | :-- |
+| BOOT flash of daq_mtp_force | PASS. `ttyACM0` appears about 1 s after `303a:1001`. |
+| Power cycle | PASS. `303a:1001` for 10 s, then `303a:4041`. |
+| CDC `INFO` | `mode=files rec=0 mounted=1 blocked_writes=0 nor_blocked=0 lost_pages=0` |
+| CDC `LOG` | NAND mounted read only (Path A). DIAG: heap_free 56904, min 53624; free stack TinyUSB 6804, mtp_vfs 7500, cmd 6560, main 1456, led 2120. |
+| `REBOOT` | PASS. 10 s `1001`, then `4041`, no replug. |
+| `DL` and reflash | PASS. `1001` in about 1 s, flash with no BOOT, boots to files mode. |
+| ptp_probe stages 1-3 | PASS (OpenSession 30 ms; one storage "DAQ", read-only, id 0x00010001; root has NAND and SD). |
+| ptp_probe stage 6 (writes) | PASS. SendObjectInfo and DeleteObject return 0x200E, FormatStore 0x2005. Device stays alive. |
+| libmtp `mtp-detect`, `mtp-folders`, `mtp-files` | PASS. 18 operations incl. GetPartialObject and GetPartialObject64. |
+| Real file, stages 4-5 | PASS. `NAND_F00002D4.BIN`, 323696 bytes, CRC32 f3d49e4f twice; 20 random GetPartialObject reads match (lengths 1 to 65536, page crossings). Speed 767 KB/s. |
+| libmtp `mtp-getfile` | PASS. Same size and CRC32 f3d49e4f. `bin_to_csv.py` decodes 40450 samples (PT sawtooth, 1 ms steps). |
+Not tested: `HANG`, `LEAVE` (forbidden), SD card (not installed), Windows, macOS, a desktop file manager (gvfs/Dolphin), a transfer longer than 1 MB.
+Note: `SendObjectInfo` refusal takes 2 s in the probe because the probe waits for an early response before it sends the data phase.
+
+## MTP-HW-5 NAND write log (the user approved a 30 s test recording at 08:2x, limit for the task 500 Mbit)
+* Why: the NAND had no files, so MTP reads could not be tested.
+* How: env `daq_sim` (synthetic PT 1 kHz and load cell 333 Hz), `REC ON` for 29 s, `REC OFF`, `PFSFLUSH`. Then `daq_mtp_force` again.
+* Result from `LIST`: file id 2, 173 pages, size 324548 bytes (323696 bytes of records). `ingested=323696 dropped=0`.
+* Bytes written to the NAND: about 173 pages x 2048 B = 354 KB = 2.8 Mbit. That is 0.6 % of the 500 Mbit limit. The file stays on the NAND (no delete without a format).
+* Total NAND writes of the MTP task: 2.8 Mbit (this run only). Before this run: 0.

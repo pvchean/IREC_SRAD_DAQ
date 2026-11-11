@@ -157,3 +157,9 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
   LOG: NAND mounted read-only (Path A), MTP storage id 0x00010001 name=DAQ total=122945536, DIAG heap_free=56904 min=53624, stack free TinyUSB=6804 mtp_vfs=7500 cmd=6560 main=1456 led=2120.
 * REBOOT PASS (clean 1001 -> 4041, no replug). DL PASS (1001 in ~1 s), reflash with no BOOT PASS, boots to files mode. The way back with no button is proven.
 * Board firmware now: daq_mtp_force. Next: ptp_probe stages 1-6 on the real NAND, mtp-detect last. LEAVE still forbidden. HANG test not yet done.
+
+## 08:35 RESULT: MTP WORKS ON THE BOARD (Linux). See Hardware_Report.md MTP-HW-4/5.
+* daq_mtp_force on the board. ptp_probe 1-6 PASS, libmtp mtp-detect/folders/files/getfile PASS, real file CRC matches, random reads OK, 767 KB/s, writes refused. The old spike failure was the unlinked tud_mtp_*_cb (fixed in the merged fork).
+* NAND: user approved a 30 s daq_sim recording: 173 pages (~2.8 Mbit, 0.6 % of 500 Mbit). The NAND now holds ONE synthetic file (id 2). All other NAND use: reads.
+* NOT tested: HANG (crash recovery, risk V-1), SD card (none), Windows, macOS, desktop file manager, long transfers, MATLAB over CDC while MTP runs. LEAVE forbidden.
+* Next (optional): HANG test with the user present; gvfs/file-manager test; stress read (full file 20x); Windows/macOS need other machines.
