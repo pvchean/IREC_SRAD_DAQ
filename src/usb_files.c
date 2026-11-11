@@ -170,7 +170,9 @@ static void on_rx(int itf, cdcacm_event_t *ev)
                 else if (!strcmp(s_line, "REBOOT")) { s_action = A_REBOOT; }
                 else if (!strcmp(s_line, "LEAVE")) { s_action = A_LEAVE; }
                 else if (!strcmp(s_line, "LOG")) { s_action = A_LOG; }
+#ifdef USB_FILES_TEST_CMDS                                      /* POLISH (MTP-R): only in env daq_mtp_force (MTP-V-12) */
                 else if (!strcmp(s_line, "HANG")) { for (;;) { } }     /* TEST ONLY (MTP-P-10): block the USB task, the 8 s task watchdog must reset the chip */
+#endif
                 else { s_line[s_ll++] = '\n'; rx_forward(s_line, s_ll); }
                 s_ll = 0;
             } else if (s_pass) {
@@ -234,6 +236,10 @@ static void usb_stack_start(void)
     const tinyusb_mtp_storage_config_t sc = { .base_path = MTP_VFS_BASE, .display_name = "DAQ", .removable = false,
                                               .total_bytes = mtp_vfs_capacity(), .free_bytes = 0 };
     ESP_ERROR_CHECK(tinyusb_mtp_register_storage(&sc, NULL));
+    /* POLISH (MTP-R): no INFO trace per MTP transaction (it fills the LOG ring). Errors and warnings stay. */
+    static const char *const quiet[] = { "tinyusb_mtp_transport", "tinyusb_mtp_ops", "tinyusb_mtp_read", "tinyusb_mtp_xfer",
+                                         "tinyusb_mtp_write", "tinyusb_mtp_store", "tinyusb_mtp_prop", "tinyusb_mtp_codec" };
+    for (unsigned i = 0; i < sizeof quiet / sizeof quiet[0]; i++) { esp_log_level_set(quiet[i], ESP_LOG_WARN); }
     tinyusb_config_t tc = TINYUSB_DEFAULT_CONFIG();
     tc.task.size = 8192;            /* REVIEW (MTP-V-4): was 6144 (MTP-P-10 P4). The MTP read runs fread -> VFS -> PFS read -> RS decode, plus a log line, in this task */
     ESP_ERROR_CHECK(tinyusb_driver_install(&tc));
