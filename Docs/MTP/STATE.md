@@ -94,3 +94,9 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * Hardware tests BLOCKED until a human holds BOOT. Non-hardware work meanwhile: see next entries.
 
 ## 02:43 heartbeat: no agent running; board still missing (needs BOOT). Started a static review agent (sonnet) of the v3 pad patch (MTP-P-11), no hardware.
+
+## 03:0x Static review of v3 done (~110k tokens, commit 8738b93): verdict SAFE for default v3 (UNVERIFIED items in MTP-P-11.6).
+* usj_pads_restore() runs first in app_main (writes only if conf0 is dirty). v1 pad-override disconnect deleted. P3 now behind -DSPIKE_P3 (default 0, env spike_force_p3).
+  Without P3: a crash/WDT reset leaves the host a stale device, but a plain replug gives a clean boot + 10 s grace.
+* Builds: spike_force, spike, spike_force_p3 OK. Not flashed. Board still missing (needs human with BOOT). Recovery + test order: Spike_Report.md MTP-P-11.7.
+* Window total agent tokens since 00:00: ~1.75M (incl. opus 247k).
