@@ -119,3 +119,34 @@ Host: Arch Linux, kernel 7.2.11, xhci. `dmesg` needs root: use `journalctl -k --
   4041: `usbreset 303a:4041` (no root).
 * Flash from files mode, full recipe: CDC `DL`; wait 4 s; `pio run -e <env> -t upload --upload-port /dev/ttyACM0`.
   (Scripts: pyserial, open /dev/ttyACM0 at 115200, write `DL\r\n`.)
+(Checkpoint written after step 2 at 01:34. Step 3 failed: see MTP-P-9.3.)
+
+### MTP-P-9.3 Step 3: libmtp (HARD FAILURE, board port LOST at 01:37)
+* The board ran `spike_force` (with the `tud_disconnect` fix) in files mode, CDC alive (`INFO` answered, up 28 s).
+* `mtp-detect` (libmtp 1.1.23, no udev entry for 303a:4041, only a warning "UNKNOWN") found the device (`Found 1 device(s): 303a:4041`),
+  then FAILED at the first transaction: `PTP_ERROR_IO: failed to open session, trying again after resetting USB interface`,
+  `LIBMTP PANIC: failed to open session on second attempt`. So the descriptors are accepted (class 6/1/1), but the first MTP bulk transfer
+  (OpenSession on EP4 OUT / response on EP4 IN) does not complete. Cause NOT known (see hypotheses below).
+* After libmtp's USB reset (kernel: `usb 1-1: reset full-speed USB device number 35`), the device re-enumerated (cdc_acm bound again),
+  but then it was dead: CDC `INFO` got no answer, a second `mtp-detect` saw no raw device, `lsusb -v` returned only cached data.
+  The firmware is hung or crashed in TinyUSB/MTP (no log: the console is invisible in files mode and `LOG` needs the CDC).
+* `usbreset 303a:4041` then hung (process in D state). The kernel log shows: `device descriptor read/64, error -110`,
+  `xhci_hcd 0000:c1:00.3: Timeout while waiting for setup device command`, `device not accepting address NN, error -62`,
+  and at 01:39:05 `usb usb1-port1: unable to enumerate USB device`. The port is now empty for the host: NO /dev/ttyACM0, no 303a device in `lsusb`.
+* No root is available (`sudo` needs a password). The sysfs `usb1-port1/disable` file is root-only. So the host port cannot be re-triggered by software.
+  THE PORT IS LOST until a human unplugs and replugs the USB cable (or presses RESET on the board).
+* RECOVERY after the replug: the board boots `spike_force`. It prints the 10 s grace on USB Serial/JTAG (303a:1001, /dev/ttyACM0).
+  Flash IN THAT WINDOW with `cd tools/mtp_spike && ~/.platformio/penv/bin/pio run -e spike -t upload --upload-port /dev/ttyACM0`
+  (env `spike` = serial mode when GPIO 2 is high; plain upload works). If the window is missed: CDC `DL` (files mode alive), else BOOT+RESET.
+* Hypotheses for the OpenSession failure (for the next agent, with the board back):
+  1. `CFG_TUD_MTP_EP_BUFSIZE`/`tud_mtp` buffer size 4096 is not a multiple of the 64 B Full Speed packet or a problem in how the class driver
+     arms EP4 OUT. Check TinyUSB 0.21 `mtp_device.c` `mtpd_open` and the endpoint buffer config.
+  2. No device-side trace: build with `CONFIG_TINYUSB_MTP_TRACE_WRITES=y` and read the ring buffer with CDC `LOG` BEFORE libmtp resets the device.
+     Better: write a small raw libusb client (`/usr/include/libusb-1.0/libusb.h` is present, gcc is present, `python-pyusb` is NOT installed) that sends
+     OpenSession (op 0x1002, tid 1, param 1) and prints each USB result. Never use `mtp-detect` first: its USB reset kills the device.
+  3. The USB reset by libmtp (and `usbreset`) hangs the DWC2 stack: after a bus reset the TinyUSB device may need a `tud_connect` cycle.
+     Look at the esp_tinyusb port for the S3 (`dcd_dwc2`, `usb_phy`), and at the line `device descriptor read/64, error -110`.
+  4. Robustness idea: a hung files mode cannot be left from software. Add a task watchdog (`CONFIG_ESP_TASK_WDT_*` with the TinyUSB task
+     subscribed, panic -> reboot) and an `esp_register_shutdown_handler()` that calls `tud_disconnect()`. A panic reboot also keeps the pull-up
+     on (the host sees a stale device), so a hung unit still needs the cable replug. This is a real risk for the DAQ: keep the BOOT button reachable.
+* Steps 3 (rest) and 4 NOT done: no MTP host test and no CDC-during-MTP test were possible.
