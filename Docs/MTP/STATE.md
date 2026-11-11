@@ -15,6 +15,11 @@ Branch: mtp-usb-mode (worktree .claude/worktrees/mtp). Base commit e9afd64.
 ## Ledger (orchestrator keeps it; approximate tokens)
 | time | agent | model | task | tokens | result |
 |---|---|---|---|---|---|
+| 00:05 | research | sonnet | MTP options | ~280k | done: Research.md (commit dcbd15c). Plan A: esp_tinyusb 3.0.0 + local fork + read-only VFS shim |
+| 00:15 | storage | sonnet | PFS read API, mtp_store, build | running | |
+| 00:15 | spike | sonnet | standalone MTP+CDC on board | running | |
 
 ## Status
-(nothing done yet)
+Decisions (orchestrator, 00:15): plan A. ONE MTP storage with root folders NAND and SD (user asked folders in root, not two drives).
+VID/PID 303A/4041 ok. Leave files mode by CDC `REBOOT` / `DL` (ROM download). macOS = MTP + OpenMTP (option C, read-only MSC, only if time).
+Open: does PFS mount write to NAND? (storage agent checks). `daq_mtp` build must disable recording before any flash of the real firmware.
