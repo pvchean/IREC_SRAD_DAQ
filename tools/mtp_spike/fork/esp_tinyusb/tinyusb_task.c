@@ -10,6 +10,7 @@
 #include "esp_private/critical_section.h"
 #include "soc/soc_caps.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_check.h"
 #include "tinyusb.h"
 #include "sdkconfig.h"
@@ -81,8 +82,11 @@ static void tinyusb_device_task(void *arg)
 
     xTaskNotifyGive(task_ctx->awaiting_handle);     // Notify parent task that TinyUSB stack was started successfully
 
+    // MTP-P-10 P2: task watchdog. A blocked or spinning USB task stops the feed and the chip panics and reboots.
+    esp_task_wdt_add(NULL);
     while (1) { // RTOS forever loop
-        tud_task();
+        tud_task_ext(1000, false);   // wake at least 1 time per second so that an idle stack still feeds
+        esp_task_wdt_reset();
     }
 
 desc_free:

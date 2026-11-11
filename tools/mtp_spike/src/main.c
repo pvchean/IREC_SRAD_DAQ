@@ -15,6 +15,9 @@
 #include "esp_timer.h"
 #include "soc/rtc_cntl_reg.h"
 #include "hal/usb_serial_jtag_ll.h"
+#include "hal/usb_wrap_ll.h"
+#include "soc/usb_wrap_struct.h"
+#include "esp_rom_sys.h"
 #include "tinyusb_default_config.h"
 #include "tinyusb.h"
 #include "tusb.h"
@@ -59,6 +62,27 @@ static void ring_dump(void)
 
 /* Give the USB pads back to USB Serial/JTAG (the mux lives in the RTC domain, a reset may not undo it). */
 static void mux_to_jtag(void) { usb_serial_jtag_ll_phy_enable_external(false); }
+static void usj_pads_restore(void);
+
+/* MTP-P-10 P3: after a panic or watchdog reset the pad pull-up of the old session stays on, so the host sees no reboot.
+ * Pull D+ and D- low for a while. LESSON (v1, 02:03): the USB Serial/JTAG registers are NOT reset by a software reset.
+ * Leaving dp_pullup=0 / dp_pulldown=1 in conf0 killed the pad for ever (grace invisible, CDC DL left the board without a
+ * pull-up, host port "not attached", human replug needed). So ALWAYS write the normal values back before leaving. */
+static void usj_pads_restore(void)
+{
+    const usb_serial_jtag_pull_override_vals_t n = { .dp_pu = true, .dm_pu = false, .dp_pd = false, .dm_pd = false };
+    usb_serial_jtag_ll_phy_enable_pull_override(&n);       /* sane register values first */
+    usb_serial_jtag_ll_phy_disable_pull_override();        /* then give the pad back to the controller */
+}
+static void usb_force_disconnect(uint32_t ms)
+{
+    usb_serial_jtag_ll_phy_enable_external(false);         /* the pads belong to the USJ PHY now (also after a panic) */
+    const usb_serial_jtag_pull_override_vals_t j = { .dp_pu = false, .dm_pu = false, .dp_pd = true, .dm_pd = true };
+    usb_serial_jtag_ll_phy_enable_pull_override(&j);
+    esp_rom_delay_us(ms * 1000);
+    usj_pads_restore();
+}
+static void usb_shutdown(void) { tud_disconnect(); esp_rom_delay_us(500000); }
 
 static volatile int s_action;     /* 1 = REBOOT, 2 = DL */
 static char s_line[64]; static int s_ll;
@@ -79,6 +103,8 @@ static void on_rx(int itf, cdcacm_event_t *ev)
                                          (unsigned long long)(esp_timer_get_time() / 1000000), (unsigned)esp_get_free_heap_size());
                     cdc_puts(o);
                 }
+                else if (!strcmp(s_line, "HANG")) { cdc_puts("HANG: blocking the USB task now, the watchdog must reset the chip\r\n"); for (;;) { } }
+                else if (!strcmp(s_line, "ABORT")) { cdc_puts("ABORT: abort() now\r\n"); vTaskDelay(pdMS_TO_TICKS(200)); abort(); }
                 else if (!strcmp(s_line, "LOG")) { ring_dump(); }
                 else { cdc_puts("ECHO: "); cdc_puts(s_line); cdc_puts("\r\n"); }
             } else if (s_ll < (int)sizeof s_line - 1) { s_line[s_ll++] = c; }
@@ -95,10 +121,12 @@ static void files_mode(void)
     const tinyusb_mtp_storage_config_t sc = { .base_path = FAKE_BASE, .display_name = "DAQ", .removable = false,
                                               .total_bytes = FAKE_NAND_SIZE, .free_bytes = 0 };
     ESP_ERROR_CHECK(tinyusb_mtp_register_storage(&sc, NULL));
-    const tinyusb_config_t tc = TINYUSB_DEFAULT_CONFIG();
+    tinyusb_config_t tc = TINYUSB_DEFAULT_CONFIG();
+    tc.task.size = 6144;                              /* MTP-P-10 P4 */
     ESP_ERROR_CHECK(tinyusb_driver_install(&tc));
     const tinyusb_config_cdcacm_t cc = { .cdc_port = TINYUSB_CDC_ACM_0, .callback_rx = on_rx };
     ESP_ERROR_CHECK(tinyusb_cdcacm_init(&cc));
+    esp_register_shutdown_handler(usb_shutdown);
     ESP_LOGI(TAG, "files mode running (MTP + CDC)");
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -109,6 +137,7 @@ static void files_mode(void)
             tud_disconnect();
             vTaskDelay(pdMS_TO_TICKS(500));
             mux_to_jtag();
+            usj_pads_restore();
             if (s_action == 2) { REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT); }
             esp_restart();
         }
@@ -117,6 +146,14 @@ static void files_mode(void)
 
 void app_main(void)
 {
+    /* P3 runs only after a crash/watchdog reset (the pull-up is stale then). Build with -DUSB_P3_ALWAYS=1 to run it at every boot. */
+    esp_reset_reason_t rr = esp_reset_reason();
+#ifndef USB_P3_ALWAYS
+#define USB_P3_ALWAYS 0
+#endif
+    if (USB_P3_ALWAYS || rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT) {
+        usb_force_disconnect(200);
+    }
     mux_to_jtag();                                   /* always start on the USB Serial/JTAG */
     s_old_vprintf = esp_log_set_vprintf(ring_vprintf);
     const gpio_config_t gc = { .pin_bit_mask = 1ULL << MODE2_PIN, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE };

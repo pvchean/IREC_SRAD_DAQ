@@ -192,7 +192,15 @@ TU_ATTR_UNUSED static const char* _mtp_phase_str[] = {
 //--------------------------------------------------------------------+
 static bool prepare_new_command(mtpd_interface_t* p_mtp) {
   p_mtp->phase = MTP_PHASE_COMMAND;
-  return usbd_edpt_xfer(p_mtp->rhport, p_mtp->ep_out, _mtpd_epbuf.buf, CFG_TUD_MTP_EP_BUFSIZE, false);
+  // MTP-P-10 P1c: a read is already armed (after DEVICE_RESET), it will receive the next command
+  if (usbd_edpt_busy(p_mtp->rhport, p_mtp->ep_out)) {
+    return true;
+  }
+  if (!usbd_edpt_xfer(p_mtp->rhport, p_mtp->ep_out, _mtpd_epbuf.buf, CFG_TUD_MTP_EP_BUFSIZE, false)) {
+    p_mtp->phase = MTP_PHASE_ERROR;
+    return false;
+  }
+  return true;
 }
 
 bool tud_mtp_data_send(mtp_container_info_t *p_container) {
@@ -354,6 +362,8 @@ bool mtpd_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t 
         if (usbd_edpt_stalled(rhport, p_mtp->ep_in)) {
           usbd_edpt_clear_stall(rhport, p_mtp->ep_in);
         }
+        // MTP-P-10 P1a: the status stage was missing (host timeout)
+        return tud_control_status(rhport, request);
       } else if (stage == CONTROL_STAGE_ACK) {
         prepare_new_command(p_mtp);
         return tud_mtp_request_device_reset_cb(&cb_data);
@@ -417,7 +427,16 @@ bool mtpd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t event, uint32_t
   switch (p_mtp->phase) {
     case MTP_PHASE_COMMAND: {
       // received new command
-      TU_VERIFY(ep_addr == p_mtp->ep_out && p_container->header.type == MTP_CONTAINER_TYPE_COMMAND_BLOCK);
+      // MTP-P-10 P1b: late IN completion or ZLP: listen again. A bad packet halts the bulk pipe (host recovers with 0x66).
+      if (ep_addr == p_mtp->ep_in || xferred_bytes == 0) {
+        (void) prepare_new_command(p_mtp);
+        break;
+      }
+      if (xferred_bytes < sizeof(mtp_container_header_t) ||
+          p_container->header.type != MTP_CONTAINER_TYPE_COMMAND_BLOCK) {
+        p_mtp->phase = MTP_PHASE_ERROR;
+        break;
+      }
       memcpy(&p_mtp->command, p_container, sizeof(mtp_container_command_t)); // save new command
       p_container->header.len = sizeof(mtp_container_header_t); // default container to header only
       preprocess_cmd(p_mtp, &cb_data);
