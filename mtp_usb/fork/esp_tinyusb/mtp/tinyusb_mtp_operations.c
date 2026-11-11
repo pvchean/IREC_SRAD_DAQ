@@ -27,16 +27,21 @@ int32_t mtp_op_get_device_info(tud_mtp_cb_data_t *cb_data)
 }
 
 static tinyusb_mtp_session_open_cb_t s_session_open_cb;     /* FORK (MTP-M) */
+static uint32_t s_session_id;                                /* FORK (MTP-H): SessionID of the open session, for SessionAlreadyOpen */
 
 void tinyusb_mtp_set_session_open_callback(tinyusb_mtp_session_open_cb_t cb) { s_session_open_cb = cb; }
 
 int32_t mtp_op_open_close_session(tud_mtp_cb_data_t *cb_data)
 {
     const mtp_container_command_t *command = cb_data->command_container;
+    if (command->header.code == MTP_OP_OPEN_SESSION && command->params[0] == 0) {
+        return MTP_RESP_INVALID_PARAMETER;      /* FORK (MTP-H): PIMA 15740 10.2.3: SessionID 0 is not valid */
+    }
     mtp_lock();
     if (command->header.code == MTP_OP_OPEN_SESSION) {
         if (mtp_context_get()->mux_protected.session_open) {
             mtp_unlock();
+            (void)mtp_container_add_uint32(&cb_data->io_container, s_session_id);   /* FORK (MTP-H): response parameter = open SessionID */
             return MTP_RESP_SESSION_ALREADY_OPEN;
         }
         /* FORK (MTP-M): call the application hook (rebuild the file list of the storage) before the session opens.
@@ -48,10 +53,12 @@ int32_t mtp_op_open_close_session(tud_mtp_cb_data_t *cb_data)
             mtp_lock();
             if (mtp_context_get()->mux_protected.session_open) {
                 mtp_unlock();
+                (void)mtp_container_add_uint32(&cb_data->io_container, s_session_id);
                 return MTP_RESP_SESSION_ALREADY_OPEN;
             }
         }
         mtp_context_get()->mux_protected.session_open = true;
+        s_session_id = command->params[0];
     } else {
         if (!mtp_context_get()->mux_protected.session_open) {
             mtp_unlock();
@@ -136,7 +143,9 @@ int32_t mtp_op_get_storage_info(tud_mtp_cb_data_t *cb_data)
 static int32_t mtp_scan_storage_locked(tinyusb_mtp_storage_t *storage, uint32_t object_format, uint32_t parent, uint32_t *handles, size_t max_handles,
                                        uint32_t *count)
 {
-    return parent == MTP_ROOT_PARENT ? mtp_scan_tree_locked(storage, object_format, handles, max_handles, count) :
+    /* FORK (MTP-H): PIMA 15740 10.5.2 and libmtp: parent 0xFFFFFFFF = the objects in the root only; parent 0 = all objects of the
+     * storage at any depth. The upstream code had the two cases swapped. */
+    return parent == MTP_OBJECT_HANDLE_INVALID ? mtp_scan_tree_locked(storage, object_format, handles, max_handles, count) :
            mtp_scan_children_locked(storage, parent, object_format, handles, max_handles, count);
 }
 
@@ -250,19 +259,21 @@ int32_t mtp_op_get_object_info(tud_mtp_cb_data_t *cb_data)
     const char *name = mtp_basename(object->path);
     char name_copy[MTP_MAX_NAME_BYTES + 1];
     (void)snprintf(name_copy, sizeof(name_copy), "%s", name);
+    char date[32];
+    mtp_time_to_date_string(object->mtime, date, sizeof(date));     /* FORK (MTP-H): dates in ObjectInfo, as in the property list */
     mtp_object_info_header_t info = {
         .storage_id = object->storage->storage_id,
         .object_format = mtp_format_from_name(name_copy, object->directory),
         .protection_status = MTP_PROTECTION_STATUS_READ_ONLY,  /* FORK: read-only */
         .object_compressed_size = object->directory ? 0 : (uint32_t)object->size,
-        .thumb_format = MTP_OBJ_FORMAT_UNDEFINED,
+        .thumb_format = 0,                                     /* FORK (MTP-H): 0 = no thumbnail (was 0x3000) */
         .thumb_compressed_size = 0,
         .thumb_pix_width = 0,
         .thumb_pix_height = 0,
         .image_pix_width = 0,
         .image_pix_height = 0,
         .image_bit_depth = 0,
-        .parent_object = object->parent,
+        .parent_object = object->parent == MTP_ROOT_PARENT ? 0 : object->parent,   /* FORK (MTP-H): an object in the root has ParentObject 0 */
         .association_type = object->directory ? MTP_ASSOCIATION_GENERIC_FOLDER : MTP_ASSOCIATION_UNDEFINED,
         .association_desc = 0,
         .sequence_number = 0,
@@ -274,9 +285,9 @@ int32_t mtp_op_get_object_info(tud_mtp_cb_data_t *cb_data)
     mtp_container_info_t *container = &cb_data->io_container;
     (void)mtp_container_add_raw(container, &info, sizeof(info));
     (void)mtp_container_add_utf8_string(container, name_copy);
-    (void)mtp_container_add_cstring(container, "");
-    (void)mtp_container_add_cstring(container, "");
-    (void)mtp_container_add_cstring(container, "");
+    (void)mtp_container_add_utf8_string(container, date);           /* DateCreated */
+    (void)mtp_container_add_utf8_string(container, date);           /* DateModified */
+    (void)mtp_container_add_cstring(container, "");                 /* Keywords */
     return tud_mtp_data_send(container) ? 0 : MTP_RESP_DEVICE_BUSY;
 }
 

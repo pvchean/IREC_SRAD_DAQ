@@ -208,9 +208,55 @@ static bool mtp_take_cancelled_transaction(uint32_t transaction_id)
 
 void mtp_transport_link_anchor(void) { }
 
+/* FORK (MTP-H): read-only device, operations that carry host data. A host (libmtp, Windows) writes the data container right
+ * after the command and only then reads the response. If the device answers in the command phase and never arms the OUT
+ * endpoint, the host write blocks until its timeout, and the device waits for the host to read the response: a deadlock.
+ * So the device reads and drops the data phase, and sends the refusal after it (tud_mtp_data_complete_cb). */
+static uint16_t s_drain_op;
+static int32_t s_drain_code;
+
+static int32_t mtp_drain_code(uint16_t op_code)
+{
+    switch (op_code) {
+    case MTP_OP_SEND_OBJECT_INFO:
+    case MTP_OP_SEND_OBJECT:
+    case MTP_OP_ANDROID_SEND_PARTIAL_OBJECT:
+        return MPT_RESC_STORE_READ_ONLY;
+    case MTP_OP_SET_OBJECT_PROP_VALUE:
+        return MTP_RESP_ACCESS_DENIED;
+    case MTP_OP_SET_DEVICE_PROP_VALUE:
+    case MTP_OP_SET_OBJECT_PROP_LIST:
+    case MTP_OP_SEND_OBJECT_PROP_LIST:
+    case MTP_OP_SET_OBJECT_REFERENCES_CODE:
+        return MTP_RESP_OPERATION_NOT_SUPPORTED;        /* not advertised: only a wrong host sends them */
+    default:
+        return 0;
+    }
+}
+
 int32_t mtp_dispatch(tud_mtp_cb_data_t *cb_data)
 {
     const mtp_container_command_t *command = cb_data->command_container;
+    int32_t drain = mtp_drain_code(command->header.code);
+    if (drain != 0) {
+        if (cb_data->phase == MTP_PHASE_COMMAND) {
+            ESP_LOGW(TAG, "operation 0x%04x refused (read-only), reading its data phase first", command->header.code);
+            s_drain_op = command->header.code;
+            s_drain_code = drain;
+            if (!tud_mtp_data_receive(&cb_data->io_container)) {
+                s_drain_op = 0;
+                return drain;
+            }
+            return 0;
+        }
+        if (cb_data->phase == MTP_PHASE_DATA && s_drain_op == command->header.code) {
+            if (!mtp_data_phase_will_complete(cb_data) && !tud_mtp_data_receive(&cb_data->io_container)) {
+                s_drain_op = 0;
+                return MTP_RESP_DEVICE_BUSY;
+            }
+            return 0;
+        }
+    }
     if (cb_data->phase == MTP_PHASE_COMMAND && command->header.code != MTP_OP_SEND_OBJECT) {
         mtp_lock();
         if (mtp_context_get()->mux_protected.pending_write.state == MTP_WRITE_ZERO_SIZE_COMPLETE) {
@@ -220,24 +266,23 @@ int32_t mtp_dispatch(tud_mtp_cb_data_t *cb_data)
     }
     /* FORK (MTP-P): read-only device. Every write operation gets an error, in the command phase. */
     switch (command->header.code) {
-    case MTP_OP_SEND_OBJECT_INFO:
-    case MTP_OP_SEND_OBJECT:
     case MTP_OP_DELETE_OBJECT:
     case MTP_OP_MOVE_OBJECT:
     case MTP_OP_ANDROID_BEGIN_EDIT_OBJECT:
-    case MTP_OP_ANDROID_SEND_PARTIAL_OBJECT:
     case MTP_OP_ANDROID_TRUNCATE_OBJECT:
     case MTP_OP_ANDROID_END_EDIT_OBJECT:
         ESP_LOGW(TAG, "write operation 0x%04x refused (read-only)", command->header.code);
         return MPT_RESC_STORE_READ_ONLY;
-    case MTP_OP_SET_OBJECT_PROP_VALUE:
-        ESP_LOGW(TAG, "SetObjectPropValue refused (read-only)");
-        return MTP_RESP_ACCESS_DENIED;
     default:
         break;
     }
     const mtp_op_handler_entry_t *entry = mtp_find_handler(command->header.code);
     if (entry) {
+        /* FORK (MTP-H): PIMA 15740 9.3: every operation except GetDeviceInfo and OpenSession needs an open session. */
+        if (cb_data->phase == MTP_PHASE_COMMAND && command->header.code != MTP_OP_GET_DEVICE_INFO && command->header.code != MTP_OP_OPEN_SESSION &&
+                !mtp_session_is_open()) {
+            return MTP_RESP_SESSION_NOT_OPEN;
+        }
         return entry->handler(cb_data);
     }
     ESP_LOGW(TAG, "unsupported MTP operation 0x%04x", command->header.code);
@@ -296,6 +341,7 @@ int32_t tud_mtp_request_get_device_status_cb(tud_mtp_request_cb_data_t *cb_data)
 
 int32_t tud_mtp_command_received_cb(tud_mtp_cb_data_t *cb_data)
 {
+    s_drain_op = 0;
     bool entered = mtp_lifecycle_enter();
     if (entered) {
         mtp_lock();
@@ -332,8 +378,16 @@ int32_t tud_mtp_data_xfer_cb(tud_mtp_cb_data_t *cb_data)
             }
             return 0;
         }
-        cb_data->io_container.header->code = (uint16_t)resp_code;
-        tud_mtp_response_send(&cb_data->io_container);
+        mtp_container_info_t resp = cb_data->io_container;
+        if ((uint8_t *)resp.header + sizeof(mtp_container_header_t) != resp.payload) {
+            /* FORK (MTP-H): a continuation packet has no header in the endpoint buffer (the header is the saved one of the whole data
+             * container). tud_mtp_response_send() sends the endpoint buffer, so build a header-only response at its start. */
+            resp.header = (mtp_container_header_t *)(void *)resp.payload;
+            resp.header->len = sizeof(mtp_container_header_t);
+            resp.payload = (uint8_t *)resp.header + sizeof(mtp_container_header_t);
+        }
+        resp.header->code = (uint16_t)resp_code;
+        tud_mtp_response_send(&resp);
     }
     if (entered) {
         mtp_lifecycle_exit();
@@ -348,8 +402,12 @@ int32_t tud_mtp_data_complete_cb(tud_mtp_cb_data_t *cb_data)
 
     bool entered = mtp_lifecycle_enter();
     if (entered) {
+        bool draining = s_drain_op != 0 && s_drain_op == cb_data->command_container->header.code;
+        s_drain_op = 0;
         if (mtp_take_cancelled_transaction(cb_data->command_container->header.transaction_id)) {
             resp_code = MTP_RESP_TRANSACTION_CANCELLED;
+        } else if (draining) {
+            resp_code = s_drain_code;                    /* FORK (MTP-H): the data phase of a refused write is read, answer now */
         } else {
             mtp_lock();
             resp_code = mtp_complete_data_locked(cb_data, response);

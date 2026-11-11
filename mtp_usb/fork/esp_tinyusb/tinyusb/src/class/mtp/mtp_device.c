@@ -451,6 +451,12 @@ bool mtpd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t event, uint32_t
       cb_data.total_xferred_bytes = p_mtp->xferred_len;
 
       const bool is_data_in = (ep_addr == p_mtp->ep_in);
+      // MTP-H: the app arms the first OUT read before it knows the data length (it passes a header-only length).
+      // The header of the first OUT packet holds the true length of the host data container: use it.
+      if (!is_data_in && p_mtp->xferred_len == xferred_bytes && xferred_bytes >= sizeof(mtp_container_header_t) &&
+          p_container->header.len >= sizeof(mtp_container_header_t) && p_container->header.len != UINT32_MAX) {
+        p_mtp->total_len = p_container->header.len;
+      }
       // For IN endpoint, threshold is bulk max packet size
       // For OUT endpoint, threshold is endpoint buffer size, since we always queue fixed size
       uint16_t threshold;

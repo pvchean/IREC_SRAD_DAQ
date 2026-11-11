@@ -32,7 +32,7 @@ static const mtp_object_prop_descriptor_t s_object_props[] = {
     { MTP_OBJ_PROP_PROTECTION_STATUS, MTP_DATA_TYPE_UINT16, false, false },
     { MTP_OBJ_PROP_OBJECT_SIZE, MTP_DATA_TYPE_UINT64, false, false },
     { MTP_OBJ_PROP_ASSOCIATION_TYPE, MTP_DATA_TYPE_UINT16, false, false },
-    { MTP_OBJ_PROP_OBJECT_FILE_NAME, MTP_DATA_TYPE_STR, true, true },
+    { MTP_OBJ_PROP_OBJECT_FILE_NAME, MTP_DATA_TYPE_STR, false, true },   /* FORK (MTP-H): read-only device: Get only */
     { MTP_OBJ_PROP_DATE_CREATED, MTP_DATA_TYPE_STR, false, false },
     { MTP_OBJ_PROP_DATE_MODIFIED, MTP_DATA_TYPE_STR, false, false },
     { MTP_OBJ_PROP_PARENT_OBJECT, MTP_DATA_TYPE_UINT32, false, false },
@@ -156,7 +156,7 @@ int32_t mtp_op_get_object_prop_value(tud_mtp_cb_data_t *cb_data)
 
     const char *name = mtp_basename(object->path);
     uint32_t storage_id = object->storage->storage_id;
-    uint32_t parent = object->parent;
+    uint32_t parent = object->parent == MTP_ROOT_PARENT ? 0 : object->parent;      /* FORK (MTP-H): root = 0 */
     uint16_t format = mtp_format_from_name(name, object->directory);
     uint16_t association = object->directory ? MTP_ASSOCIATION_GENERIC_FOLDER : MTP_ASSOCIATION_UNDEFINED;
     uint64_t size = object->size;
@@ -178,7 +178,7 @@ int32_t mtp_op_get_object_prop_value(tud_mtp_cb_data_t *cb_data)
         (void)mtp_container_add_uint16(container, format);
         break;
     case MTP_OBJ_PROP_PROTECTION_STATUS:
-        (void)mtp_container_add_uint16(container, MTP_PROTECTION_STATUS_NO_PROTECTION);
+        (void)mtp_container_add_uint16(container, MTP_PROTECTION_STATUS_READ_ONLY);      /* FORK (MTP-H): as in ObjectInfo */
         break;
     case MTP_OBJ_PROP_NON_CONSUMABLE:
         (void)mtp_container_add_uint8(container, 0);
@@ -237,7 +237,7 @@ static bool mtp_builder_append_object_prop(mtp_payload_builder_t *builder, const
     case MTP_OBJ_PROP_OBJECT_FORMAT:
         return mtp_builder_append_uint16(builder, format);
     case MTP_OBJ_PROP_PROTECTION_STATUS:
-        return mtp_builder_append_uint16(builder, MTP_PROTECTION_STATUS_NO_PROTECTION);
+        return mtp_builder_append_uint16(builder, MTP_PROTECTION_STATUS_READ_ONLY);     /* FORK (MTP-H): as in ObjectInfo */
     case MTP_OBJ_PROP_NON_CONSUMABLE:
         return mtp_builder_append_uint8(builder, 0);
     case MTP_OBJ_PROP_OBJECT_SIZE:
@@ -247,7 +247,7 @@ static bool mtp_builder_append_object_prop(mtp_payload_builder_t *builder, const
     case MTP_OBJ_PROP_ASSOCIATION_TYPE:
         return mtp_builder_append_uint16(builder, object->directory ? MTP_ASSOCIATION_GENERIC_FOLDER : MTP_ASSOCIATION_UNDEFINED);
     case MTP_OBJ_PROP_PARENT_OBJECT:
-        return mtp_builder_append_uint32(builder, object->parent);
+        return mtp_builder_append_uint32(builder, object->parent == MTP_ROOT_PARENT ? 0 : object->parent);   /* FORK (MTP-H): root = 0 */
     case MTP_OBJ_PROP_DATE_CREATED:
     case MTP_OBJ_PROP_DATE_ADDED:
     case MTP_OBJ_PROP_DATE_MODIFIED: {
@@ -385,6 +385,24 @@ static int32_t mtp_builder_append_prop_list_locked(mtp_payload_builder_t *builde
         return MTP_RESP_OK;
     }
 
+    if (object_handle == MTP_OBJECT_HANDLE_INVALID) {
+        /* FORK (MTP-H): MTP 1.1 GetObjectPropList: handle 0 = the root; depth 1 = the objects in the root. */
+        if (depth == 0) {
+            return MTP_RESP_OK;
+        }
+        for (size_t i = 0; i < CONFIG_TINYUSB_MTP_MAX_STORAGES; i++) {
+            if (!mtp_context_get()->mux_protected.storages[i].used) {
+                continue;
+            }
+            int32_t ret = mtp_builder_append_storage_tree_props_locked(builder, &mtp_context_get()->mux_protected.storages[i], object_format, prop_code,
+                                                                       depth == MTP_DEPTH_ALL ? MTP_DEPTH_ALL : depth - 1U, queue, child_handles);
+            if (ret != MTP_RESP_OK) {
+                return ret;
+            }
+        }
+        return MTP_RESP_OK;
+    }
+
     mtp_object_t *object = mtp_object_from_handle_locked(object_handle);
     return object ? mtp_builder_append_object_tree_props_locked(builder, object, object_format, prop_code, depth, queue, child_handles) : MTP_RESP_INVALID_OBJECT_HANDLE;
 }
@@ -408,8 +426,8 @@ int32_t mtp_op_get_object_prop_list(tud_mtp_cb_data_t *cb_data)
     if (group_code != 0) {
         return MTP_RESP_GROUP_NOT_SUPPORTED;
     }
-    if (object_handle == MTP_OBJECT_HANDLE_INVALID) {
-        return MTP_RESP_INVALID_OBJECT_HANDLE;
+    if (param_count < 1) {
+        return MTP_RESP_INVALID_PARAMETER;
     }
     if (prop_code != MTP_ROOT_PARENT && mtp_object_prop_find((uint16_t)prop_code) == NULL) {
         return MTP_RESP_OBJECT_PROP_NOT_SUPPORTED;
