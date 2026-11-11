@@ -179,3 +179,7 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 
 ## KDE file-manager test and polish verification (MTP-HW-7, small hw agent)
 * Polished daq_mtp_force is on the board (DL flash OK, DIAG main stack free 3408). KDE path via `kioclient5` works: `mtp:/IREC DAQ/DAQ/NAND`, 3 copies CRC f3d49e4f at about 0.6 s each; write and delete refused; INFO clean (blocked_writes=0 nor_blocked=0 lost_pages=0). Raw libusb tools are blocked by kiod6 (host side). Open: Windows, macOS, HANG, SD card. Details: Hardware_Report.md MTP-HW-7.
+
+## 09:3x KDE test PASS (kioclient5, 3 copies CRC ok ~540 KB/s, writes refused), Final_Summary.md written (974f884). Fixed the stale Deviation Log row. Board: polished daq_mtp_force (code 333c862).
+* Corrections to the summary: probe runs = 30 soak + 6 concurrency (36) + 10 earlier; this board has NO MODE2 switch (GPIO2 high): use env daq_mtp_force (User_Guide says "switch": needs a note for boards with the switch).
+* Remaining: HANG (needs user near the board), SD card, Windows, macOS. Heartbeats: no work unless the user asks. Final summary job at 10:51.
