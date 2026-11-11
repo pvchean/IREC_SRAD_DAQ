@@ -57,3 +57,16 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * `daq_mtp` builds; `files_mode_usb_start` is W (weak default) in the ELF. The weak->strong override test (MTP-B-6) is still TODO: do it when the USB code adds the strong symbol.
 * tools/mtp_store_test.sh PASS (blocked NAND 3, NOR 1). Deviation Log.md created. README MODE2 line updated.
 * 01:27 running: sonnet spike TEST agent (REBOOT/DL first, then libmtp, GetPartialObject, speed, write refusal, CDC alongside MTP).
+
+## 01:45 Spike TEST report (~120k tokens, commits a6004ca, e7f0fde)
+* PASS: spike_force flashes; lsusb: 303a:4041 FS, IAD, CDC ACM + PTP class 6/1/1 "IREC DAQ MTP"; CDC INFO works in files mode.
+* Way back: REBOOT/DL left D+ pulled up (host saw a stale dead device). FIX: tud_disconnect() + 500 ms delay before restart
+  (in tools/mtp_spike/src/main.c; must go into the real firmware). After the fix DL -> 303a:1001 in 4 s, esptool flash works, no BOOT.
+* FAIL: libmtp mtp-detect finds the device but PTP_ERROR_IO "failed to open session"; libmtp's USB reset hung the firmware; the host
+  xhci now says "device not accepting address", usb_hub_wq kworker stuck in D. NO /dev/ttyACM0, NO 303a in lsusb. No root -> cannot recover.
+  >>> BOARD NEEDS A HUMAN REPLUG (or RESET) <<< Until then NO hardware tests. Board firmware: spike_force (with fix), hung in files mode.
+  After a replug: 10 s grace on USB-Serial-JTAG; plain `pio run -e spike -t upload --upload-port /dev/ttyACM0` works in that window.
+* Lesson: never run mtp-detect first. Use a raw libusb client (gcc+libusb headers exist, no pyusb) + CONFIG_TINYUSB_MTP_TRACE_WRITES + CDC LOG ring.
+* Rule added: before any host-side MTP test, the firmware must have a hardware watchdog that resets the chip when the USB stack hangs.
+* 01:45 started: OPUS static review (no hardware): Docs/MTP/Opus_Hint.md (root causes, test plan, watchdog self-recovery).
+* Ledger window A+: haiku 43k, spike-test 120k (est. total since 00:00: ~1.2M agent tokens).
