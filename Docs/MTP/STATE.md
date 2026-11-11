@@ -83,3 +83,12 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * P1, P2, P4 built; WDT PROVEN (HANG -> reset in 8 s -> host sees disconnect and 4041 again). ptp_probe.c written (compiles, not run).
 * P3 v1 broke the USB Serial/JTAG pad: board is INVISIBLE (port "not attached"). HUMAN NEEDED: hold BOOT + replug, then flash spike_force (v3, fixed, untested).
   Recipe and test order: MTP-P-10.4. No MTP host test has run yet.
+
+## 02:10 FIX agent report (~130k tokens): WDT PROVEN, board LOST again (needs BOOT button)
+* P1 (mtp_device recovery back-port), P2 (TWDT fed by USB task, silent panic reboot), P4 (sdkconfig) work. CDC `HANG` -> chip resets itself in ~8 s,
+  re-enumerates as 303a:4041 in ~10 s, no human. 
+* P3 v1 (D+/D- low at every boot) killed the USB-Serial-JTAG pad: grace window gone, then `DL` dropped the board. Agent noticed and continued (mistake; rule added).
+* Board: flash = v1 (buggy), in ROM download mode, no D+ pull-up, no /dev/ttyACM0. RECOVERY (human): hold BOOT, plug in, check `lsusb` shows 303a:1001, then
+  `cd tools/mtp_spike && ~/.platformio/penv/bin/pio run -e spike_force -t upload --upload-port /dev/ttyACM0` (builds+flashes v3: usj_pads_restore(), P3 only after crash reset; untested).
+* Written: tools/mtp_spike/host/ptp_probe.c (raw libusb, stages 1-7 + -r), host_cdc.py, HANG/ABORT cmds. Not run. Test order after recovery: Spike_Report.md MTP-P-10.4 (a power cycle, b DL, c HANG, then MTP stages).
+* Hardware tests BLOCKED until a human holds BOOT. Non-hardware work meanwhile: see next entries.

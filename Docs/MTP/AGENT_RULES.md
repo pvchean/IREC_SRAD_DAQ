@@ -33,3 +33,9 @@ files mode if possible (composite MTP + CDC); if not possible, drop it.
 * Before you finish or pause, write what you did, what you learned, what failed, and the next steps in your own file in
   Docs/MTP/ (named in your task). A new agent must be able to continue from the files alone, with no chat context.
 * Your final message: under 25 lines. Facts, file paths, commit hashes, open questions. Report your approximate token use.
+
+## Board-safety rules (added 02:10 after the board was lost twice)
+* Any anomaly (grace window missing, port gone, a mode that differs from the test plan) = STOP at once, report it, do nothing else.
+  Do not "continue and fix later".
+* Never run `DL`/`REBOOT`, or flash again, after you change boot-time USB code, until a plain power cycle and the 10 s grace window have been proven.
+* Never touch USB pad/PHY registers at every boot. Crash-reset-only code first, and keep a path back with no BOOT button.
