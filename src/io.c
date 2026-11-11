@@ -47,6 +47,9 @@ void io_init(void)
 
     s_auto  = gpio_get_level(MODE1_PIN) != 0;
     s_files = gpio_get_level(MODE2_PIN) == 0;
+#if defined(DAQ_MTP) && defined(DAQ_MTP_FORCE_FILES)
+    s_files = true;                     /* test env daq_mtp_force: files mode with no switch on MODE2 (LEAVE below still gives serial mode once) */
+#endif
     if (s_leave_a == LEAVE_MAGIC && s_leave_b == ~LEAVE_MAGIC) {      /* files_mode_leave() asked for serial mode, once */
         ESP_LOGW(TAG, "files mode skipped once: serial mode");
         s_files = false;
