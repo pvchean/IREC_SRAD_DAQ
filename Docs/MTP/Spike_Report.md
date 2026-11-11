@@ -293,3 +293,13 @@ Agent (after the human says the board is plugged in, no BOOT):
 5. `REBOOT`: expect disconnect, then 1001 for 10 s, then 4041. Check `LOG` ("reset reason 11" or similar = software, "pads clean").
 6. `HANG` (TWDT test, P3 off): the board resets after 8 s. The host may keep a stale 4041. That is expected. Ask the human for a replug (or skip this step; the WDT proof of MTP-P-10.2 stands). Only after steps 3 to 5 passed, and only if the human is at the board, flash `-e spike_force_p3` through `DL` and repeat `HANG`: the host should see a disconnect and 4041 again. If not: go back to `spike_force`.
 7. MTP host tests, with `ptp_probe` only (see MTP-P-10.4 item d). Never `mtp-detect` first, never `usbreset`.
+
+## MTP-P-12 ptp_probe against the real firmware
+`tools/mtp_spike/host/ptp_probe.c` now tests the real `daq_mtp` storage (NAND_F<hex>.BIN in folder NAND, uSD_F<hex>.BIN in folder SD, read-only). The old fake-pattern mode stays behind `--fake`.
+Build: `gcc -O2 -Wall -Wextra -o ptp_probe ptp_probe.c $(pkg-config --cflags --libs libusb-1.0)`. Not run on hardware yet.
+Options: `-c PORT`, `-s STAGE` (default 6), `-m MB` (default 8), `-r`, `--fake`.
+* Stage 3: lists each root folder and its files with sizes. An empty folder prints "folder empty" and counts as OK.
+* Stage 4: reads the first NAND file (whole, or the first MB megabytes) two times. It prints CRC32 and speed. The two CRCs and the bytes must be equal. No file means skip (OK).
+* Stage 5: 20 GetPartialObject reads with lengths 1, 7, 8, 1876, 1877, 4096, 65536 and offsets near page boundaries (fixed pseudo-random sequence). Each result must equal the bytes held from stage 4.
+* Stage 6: SendObjectInfo, DeleteObject and FormatStore must each give a PTP error, never 0x2001. Then GetStorageIDs must still answer.
+* Every USB transfer has a timeout of 4 s or less (2 s for the refusal response). The exit code is 0 only if all checks pass.

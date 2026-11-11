@@ -1,15 +1,19 @@
-/* ptp_probe: raw libusb PTP/MTP client for the IREC DAQ spike (MTP-P-10). Helper for Claude, not a deliverable.
- * Build: gcc -O2 -Wall -o ptp_probe ptp_probe.c -lusb-1.0
- * Run:   ./ptp_probe [-c /dev/ttyACM0] [-s STAGE] [-r]
+/* ptp_probe: raw libusb PTP/MTP client for the IREC DAQ (MTP-P-10, MTP-P-12). Helper for Claude, not a deliverable.
+ * Build: gcc -O2 -Wall -Wextra -o ptp_probe ptp_probe.c $(pkg-config --cflags --libs libusb-1.0)
+ * Run:   ./ptp_probe [-c /dev/ttyACM0] [-s STAGE] [-m MB] [-r] [--fake]
  *   -c PORT  CDC port: sends INFO after each phase, and LOG at the end or on failure (shows that the firmware is alive).
- *   -s N     last stage to run (default 7):
+ *   -m MB    real mode: how many MB of the first NAND file stage 4 reads (default 8; a smaller file is read whole).
+ *   -s N     last stage to run (default 6; 7 with --fake). REAL firmware (daq_mtp: NAND_F<hex>.BIN in NAND, uSD_F<hex>.BIN in SD):
  *            1 status + OpenSession            2 + GetDeviceInfo, GetStorageIDs, GetStorageInfo
- *            3 + GetObjectHandles (root, NAND), GetObjectInfo     4 + GetObject F00002 (100 KB)
- *            5 + GetObject F00001 (3 MB, speed)                   6 + GetPartialObject at random offsets
- *            7 + SendObjectInfo/DeleteObject (must be refused)
+ *            3 + list folders and files (names, sizes; an empty folder is OK)
+ *            4 + read first NAND file (GetObject or GetPartialObject 0..MB) twice: CRC32, speed, CRCs must match
+ *            5 + 20 GetPartialObject reads (lengths 1, 7, 8, 1876, 1877, 4096, 65536, page crossings) vs the bytes of stage 4
+ *            6 + write refusal: SendObjectInfo, DeleteObject, FormatStore must give a PTP error; then GetStorageIDs again
+ *   --fake   old mode for the spike firmware (fake files F00001/F00002, pattern byte = (offset & 0xFF) ^ file number):
+ *            3 lists NAND, 4 GetObject F00002 (100 KB), 5 GetObject F00001 (3 MB), 6 partial reads, 7 write refusal.
  *   -r       after the run: libusb-less PTP DEVICE_RESET class request (0x66), then OpenSession again.
  * Rules (Opus hint): never libusb_reset_device, never set_configuration, never clear_halt. Every transfer has a timeout.
- * Exit code 0 = all checks passed. The data pattern of the fake VFS: byte = (offset & 0xFF) ^ file number. */
+ * Exit code 0 = all checks passed. */
 #define _GNU_SOURCE
 #include <libusb-1.0/libusb.h>
 #include <stdio.h>
@@ -27,18 +31,19 @@
 #define IFACE 2
 #define EP_OUT 0x04
 #define EP_IN  0x84
-#define T_BULK 3000   /* ms, per bulk transfer */
+#define T_BULK 4000   /* ms, per bulk transfer */
 #define CHUNK  16384
 
 enum { C_CMD = 1, C_DATA = 2, C_RSP = 3, C_EVT = 4 };
 enum { OP_GETDEVINFO = 0x1001, OP_OPEN = 0x1002, OP_CLOSE = 0x1003, OP_STORIDS = 0x1004, OP_STORINFO = 0x1005,
        OP_HANDLES = 0x1007, OP_OBJINFO = 0x1008, OP_GETOBJ = 0x1009, OP_DELETE = 0x100B, OP_SENDINFO = 0x100C,
-       OP_SENDOBJ = 0x100D, OP_PARTIAL = 0x101B };
+       OP_SENDOBJ = 0x100D, OP_FORMAT = 0x100F, OP_PARTIAL = 0x101B };
 
 static libusb_device_handle *h;
 static const char *cdc_port;
 static uint32_t tid;
 static int fails;
+static int fake;
 static struct timespec t0;
 
 static double now_ms(void)
@@ -318,15 +323,155 @@ static void write_refusal(void)
     ptp_free(&o);
 }
 
+/* ---- real-firmware mode (MTP-P-12) ---- */
+static uint32_t crc32_buf(const uint8_t *p, size_t n)
+{
+    static uint32_t tab[256];
+    if (!tab[1]) { for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) { c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1; } tab[i] = c; } }
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) { c = tab[(c ^ p[i]) & 0xFF] ^ (c >> 8); }
+    return ~c;
+}
+
+static uint8_t *held; static size_t held_len;     /* bytes of the first NAND file read in stage 4 */
+static obj_t first;                               /* first NAND file */
+static uint32_t sid_g;
+static int read_mb = 8;
+
+static void real_list(void)
+{
+    uint32_t hs[64]; int n = list_handles(0xFFFFFFFF, hs, 64, "GetObjectHandles(root)");
+    for (int i = 0; i < n; i++) {
+        obj_t d;
+        if (!get_objinfo(hs[i], &d) || d.fmt != 0x3001) { continue; }
+        uint32_t fh[256]; int m = list_handles(d.h, fh, 256, "GetObjectHandles(folder)");
+        if (m == 0) { LOG("folder '%s': folder empty (OK)", d.name); }
+        for (int j = 0; j < m; j++) {
+            obj_t f;
+            if (!get_objinfo(fh[j], &f)) { continue; }
+            LOG("  %s/%s  %u B", d.name, f.name, f.size);
+            if (!strcmp(d.name, "NAND") && !first.h && f.fmt != 0x3001) { first = f; }
+        }
+    }
+    if (!first.h) { LOG("no NAND file to read: stages 4 and 5 will be skipped (OK)"); }
+}
+
+/* read the first nbytes of the file; returns malloc buffer or NULL. */
+static uint8_t *read_range(const obj_t *ob, uint32_t off, uint32_t nbytes, double *dt)
+{
+    ptp_t r; uint32_t par[3] = { ob->h, off, nbytes };
+    double a = now_ms();
+    if (off == 0 && nbytes == ob->size) { ptp(&r, OP_GETOBJ, par, 1, "GetObject"); }
+    else { ptp(&r, OP_PARTIAL, par, 3, "GetPartialObject"); }
+    if (dt) { *dt = now_ms() - a; }
+    if (r.err || r.rc != 0x2001 || r.dlen != nbytes) { FAIL("read '%s' off %u len %u: rc 0x%04x err %d got %zu B", ob->name, off, nbytes, r.rc, r.err, r.dlen); ptp_free(&r); return NULL; }
+    uint8_t *d = r.data; r.data = NULL;
+    return d;
+}
+
+static void real_read(void)
+{
+    uint32_t n = first.size < (uint32_t)read_mb * 1048576u ? first.size : (uint32_t)read_mb * 1048576u;
+    if (n == 0) { LOG("first file is empty: nothing to read (OK)"); return; }
+    double dt1, dt2;
+    uint8_t *a = read_range(&first, 0, n, &dt1);
+    if (!a) { return; }
+    uint32_t c1 = crc32_buf(a, n);
+    LOG("read 1 '%s': %u B, CRC32 %08x, %.0f ms = %.1f KB/s", first.name, n, c1, dt1, n / 1024.0 / (dt1 / 1000.0));
+    uint8_t *b = read_range(&first, 0, n, &dt2);
+    if (b) {
+        uint32_t c2 = crc32_buf(b, n);
+        LOG("read 2 '%s': CRC32 %08x, %.0f ms = %.1f KB/s", first.name, c2, dt2, n / 1024.0 / (dt2 / 1000.0));
+        if (c1 != c2 || memcmp(a, b, n)) { FAIL("two reads of '%s' differ (%08x vs %08x)", first.name, c1, c2); }
+        else { LOG("  both reads equal: OK"); }
+        free(b);
+    }
+    held = a; held_len = n;
+}
+
+static void real_partial(void)
+{
+    if (!held) { LOG("no data held from stage 4: partial test skipped"); return; }
+    static const uint32_t lens[] = { 1, 7, 8, 1876, 1877, 4096, 65536, 1875, 3753, 1 };
+    uint64_t x = 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < 20; i++) {
+        uint32_t off, len = lens[i % 10];
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        if (i == 0) { off = 0; }
+        else if (i == 1) { off = 1876 - 3; }                       /* crosses the first page boundary */
+        else if (i == 2) { off = (uint32_t)held_len > 8 ? (uint32_t)held_len - 8 : 0; }
+        else if (i < 10) { off = 1877u * (uint32_t)(x % 64) + (uint32_t)(i * 5) - 5; }  /* near page boundaries */
+        else { off = (uint32_t)(x % held_len); }
+        if (off >= held_len) { off = (uint32_t)(x % held_len); }
+        if ((uint64_t)off + len > held_len) { len = (uint32_t)(held_len - off); }
+        ptp_t r; uint32_t par[3] = { first.h, off, len };
+        double a = now_ms();
+        ptp(&r, OP_PARTIAL, par, 3, "GetPartialObject");
+        double dt = now_ms() - a;
+        if (r.err || r.rc != 0x2001) { FAIL("partial off %u len %u: rc 0x%04x err %d", off, len, r.rc, r.err); ptp_free(&r); break; }
+        if (r.dlen != len) { FAIL("partial off %u len %u: got %zu B", off, len, r.dlen); }
+        else if (memcmp(r.data, held + off, len)) { FAIL("partial off %u len %u: bytes differ from the full read", off, len); }
+        else { LOG("  partial %2d off %u len %u OK (%.1f ms)", i, off, len, dt); }
+        ptp_free(&r);
+    }
+}
+
+/* write refusal, real mode: every write operation must give a PTP error, never 0x2001. */
+static void real_write_refusal(void)
+{
+    uint8_t d[128]; memset(d, 0, sizeof d); size_t k = 0;
+    le32(d + k, sid_g); k += 4; le16(d + k, 0x3000); k += 2; le16(d + k, 0); k += 2; le32(d + k, 16); k += 4;
+    k += 2 + 4 * 6; le32(d + k, 0); k += 4; le16(d + k, 0); k += 2; le32(d + k, 0); k += 4; le32(d + k, 0); k += 4;
+    const char *nm = "W.TXT"; d[k++] = strlen(nm) + 1;
+    for (const char *c = nm; *c; c++) { le16(d + k, *c); k += 2; }
+    le16(d + k, 0); k += 2; d[k++] = 0; d[k++] = 0; d[k++] = 0;
+
+    uint32_t t = tid++, par[2] = { sid_g, 0xFFFFFFFF };
+    LOG("SendObjectInfo (expect a PTP error)");
+    if (send_container(C_CMD, OP_SENDINFO, t, par, 2, NULL, 0)) { FAIL("SendObjectInfo command failed to send"); return; }
+    uint8_t b[512]; int n = 0;
+    int r = bulk(EP_IN, b, sizeof b, &n, 2000);
+    if (!r && n >= 12 && rd16(b + 4) == C_RSP) {
+        uint16_t rc = rd16(b + 6);
+        if (rc == 0x2001) { FAIL("SendObjectInfo accepted!"); } else { LOG("  refused at command phase: rc 0x%04x OK", rc); }
+    } else {
+        LOG("  no immediate response (%s), sending the data phase", r ? libusb_error_name(r) : "other");
+        if (send_container(C_DATA, OP_SENDINFO, t, NULL, 0, d, k)) { FAIL("data phase failed to send"); return; }
+        ptp_t o;
+        if (read_response(&o, t)) { FAIL("no response to SendObjectInfo"); }
+        else if (o.rc == 0x2001) { FAIL("SendObjectInfo accepted!"); }
+        else { LOG("  refused: rc 0x%04x OK", o.rc); }
+    }
+    ptp_t o; uint32_t dp[2] = { first.h ? first.h : 1, 0 };
+    ptp(&o, OP_DELETE, dp, 2, "DeleteObject (expect a PTP error)");
+    if (o.err) { FAIL("DeleteObject: no clean response"); }
+    else if (o.rc == 0x2001) { FAIL("DeleteObject accepted!"); }
+    else { LOG("  delete refused: rc 0x%04x OK", o.rc); }
+    ptp_free(&o);
+    uint32_t fp[1] = { sid_g };
+    ptp(&o, OP_FORMAT, fp, 1, "FormatStore (expect a PTP error)");
+    if (o.err) { FAIL("FormatStore: no clean response"); }
+    else if (o.rc == 0x2001) { FAIL("FormatStore accepted!"); }
+    else { LOG("  format refused: rc 0x%04x OK", o.rc); }
+    ptp_free(&o);
+    ptp(&o, OP_STORIDS, NULL, 0, "GetStorageIDs (device must be alive)");
+    if (o.err || o.rc != 0x2001) { FAIL("device not alive after the write tests: rc 0x%04x err %d", o.rc, o.err); }
+    else { LOG("  device alive, %u storage(s)", o.dlen >= 4 ? rd32(o.data) : 0); }
+    ptp_free(&o);
+}
+
 int main(int argc, char **argv)
 {
-    int stage = 7, do_reset = 0;
+    int stage = -1, do_reset = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-c") && i + 1 < argc) { cdc_port = argv[++i]; }
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) { stage = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "-m") && i + 1 < argc) { read_mb = atoi(argv[++i]); if (read_mb < 1) { read_mb = 1; } }
+        else if (!strcmp(argv[i], "--fake")) { fake = 1; }
         else if (!strcmp(argv[i], "-r")) { do_reset = 1; }
-        else { fprintf(stderr, "usage: %s [-c cdcport] [-s stage 1..7] [-r]\n", argv[0]); return 2; }
+        else { fprintf(stderr, "usage: %s [-c cdcport] [-s stage 1..6] [-m MB] [-r] [--fake]\n", argv[0]); return 2; }
     }
+    if (stage < 0) { stage = fake ? 7 : 6; }
     clock_gettime(CLOCK_MONOTONIC, &t0);
     cdc_open();
     cdc_alive("start");
@@ -368,7 +513,7 @@ int main(int argc, char **argv)
     ptp(&o, OP_STORIDS, NULL, 0, "GetStorageIDs");
     uint32_t sid = 0;
     if (o.err || o.rc != 0x2001 || o.dlen < 8) { FAIL("GetStorageIDs rc 0x%04x err %d", o.rc, o.err); }
-    else { LOG("  %u storage(s), first id 0x%08x", rd32(o.data), rd32(o.data + 4)); sid = rd32(o.data + 4); }
+    else { LOG("  %u storage(s), first id 0x%08x", rd32(o.data), rd32(o.data + 4)); sid = rd32(o.data + 4); sid_g = sid; }
     ptp_free(&o);
     if (sid) {
         uint32_t par[1] = { sid };
@@ -384,6 +529,20 @@ int main(int argc, char **argv)
     cdc_alive("storage calls");
     if (stage < 3) { goto close; }
 
+    if (!fake) {
+        real_list();
+        cdc_alive("object listing");
+        if (stage < 4) { goto close; }
+        real_read();
+        cdc_alive("read of the first NAND file");
+        if (stage < 5) { goto close; }
+        real_partial();
+        cdc_alive("GetPartialObject");
+        if (stage < 6) { goto close; }
+        real_write_refusal();
+        cdc_alive("write refusal");
+        goto close;
+    }
     uint32_t hs[64]; int n = list_handles(0xFFFFFFFF, hs, 64, "GetObjectHandles(root)");
     uint32_t nand = 0;
     for (int i = 0; i < n; i++) { obj_t ob; if (get_objinfo(hs[i], &ob) && !strcmp(ob.name, "NAND") && ob.fmt == 0x3001) { nand = ob.h; } }
@@ -419,6 +578,7 @@ int main(int argc, char **argv)
 close:
     ptp(&o, OP_CLOSE, NULL, 0, "CloseSession");
     ptp_free(&o);
+    free(held);
     cdc_alive("CloseSession");
     if (do_reset) {
         r = libusb_control_transfer(h, 0x21, 0x66, 0, IFACE, NULL, 0, 1000);
