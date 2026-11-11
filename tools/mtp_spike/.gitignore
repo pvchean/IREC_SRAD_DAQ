@@ -1,0 +1,6 @@
+managed_components/
+.pio/
+build/
+sdkconfig.*
+!sdkconfig.defaults
+dependencies.lock
