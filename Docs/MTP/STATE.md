@@ -92,3 +92,5 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
   `cd tools/mtp_spike && ~/.platformio/penv/bin/pio run -e spike_force -t upload --upload-port /dev/ttyACM0` (builds+flashes v3: usj_pads_restore(), P3 only after crash reset; untested).
 * Written: tools/mtp_spike/host/ptp_probe.c (raw libusb, stages 1-7 + -r), host_cdc.py, HANG/ABORT cmds. Not run. Test order after recovery: Spike_Report.md MTP-P-10.4 (a power cycle, b DL, c HANG, then MTP stages).
 * Hardware tests BLOCKED until a human holds BOOT. Non-hardware work meanwhile: see next entries.
+
+## 02:43 heartbeat: no agent running; board still missing (needs BOOT). Started a static review agent (sonnet) of the v3 pad patch (MTP-P-11), no hardware.
