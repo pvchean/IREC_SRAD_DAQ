@@ -17,4 +17,7 @@ void usb_files_log_start(void);
    give the PHY back to the USB Serial/JTAG, repair the pad. Called by files_mode_restart(). Safe before the USB stack runs (it skips tud_disconnect). */
 void usb_files_prepare_restart(void);
 
+/* Sets the log level of the MTP/TinyUSB trace tags to WARN. Call it again after every esp_log_level_set("*", ...) (that call removes per-tag levels). */
+void usb_files_log_quiet(void);
+
 #endif

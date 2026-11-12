@@ -26,6 +26,7 @@
 #include "mtp_store_pfs.h"
 #ifdef DAQ_MTP_USB
 #include "mtp_vfs.h"
+#include "usb_files.h"
 #endif
 #include "nau7802.h"
 #include "profile.h"
@@ -211,7 +212,12 @@ static void do_chunk(const char *src, const char *name, const char *offs, const 
            (unsigned long)(n ? esp_rom_crc32_le(0, s_chunk, (uint32_t)n) : 0U));
     cio_flush();
     if (n) { (void)usb_put(s_chunk, n); }               /* a failure shows on the host as a short chunk */
-    if (was_on) { stream_enable(true); } else { esp_log_level_set("*", ESP_LOG_INFO); }
+    if (was_on) { stream_enable(true); } else {
+        esp_log_level_set("*", ESP_LOG_INFO);
+#ifdef DAQ_MTP_USB
+        usb_files_log_quiet();                       /* REVIEW (MTP-C): the "*" call removed the per-tag WARN levels of the MTP trace tags */
+#endif
+    }
 }
 
 static void do_list(void)

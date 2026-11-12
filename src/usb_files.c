@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
@@ -172,6 +174,11 @@ static void on_rx(int itf, cdcacm_event_t *ev)
                 else if (!strcmp(s_line, "LOG")) { s_action = A_LOG; }
 #ifdef USB_FILES_TEST_CMDS                                      /* POLISH (MTP-R): only in env daq_mtp_force (MTP-V-12) */
                 else if (!strcmp(s_line, "HANG")) { for (;;) { } }     /* TEST ONLY (MTP-P-10): block the USB task, the 8 s task watchdog must reset the chip */
+                /* REVIEW (MTP-C): more crash types, TEST ONLY (same flag). ABORT = abort() panic. CRASH = write through a null pointer (store fault panic).
+                   INTWDT = interrupts off in a loop: the interrupt watchdog must reset the chip. */
+                else if (!strcmp(s_line, "ABORT")) { abort(); }
+                else if (!strcmp(s_line, "CRASH")) { *(volatile uint32_t *)(uintptr_t)0 = 0xDEAD; }
+                else if (!strcmp(s_line, "INTWDT")) { portDISABLE_INTERRUPTS(); for (;;) { } }
 #endif
                 else { s_line[s_ll++] = '\n'; rx_forward(s_line, s_ll); }
                 s_ll = 0;
@@ -224,6 +231,16 @@ static void on_session_open(void)
     mtp_vfs_refresh();
 }
 
+/* POLISH (MTP-R): no INFO trace per MTP transaction (it fills the LOG ring). Errors and warnings stay.
+   REVIEW (MTP-C): esp_log_level_set("*", ...) removes every per-tag level. The CHUNK command does that after each chunk (cmd.c), so the
+   tags must be set again after it. That is why the trace lines came back after the first serial download (MTP-HW-13 problem 7). */
+void usb_files_log_quiet(void)
+{
+    static const char *const quiet[] = { "tinyusb_mtp_transport", "tinyusb_mtp_ops", "tinyusb_mtp_read", "tinyusb_mtp_xfer",
+                                         "tinyusb_mtp_write", "tinyusb_mtp_store", "tinyusb_mtp_prop", "tinyusb_mtp_codec" };
+    for (unsigned i = 0; i < sizeof quiet / sizeof quiet[0]; i++) { esp_log_level_set(quiet[i], ESP_LOG_WARN); }
+}
+
 static void usb_stack_start(void)
 {
     s_rx_sb = xStreamBufferCreate(RX_SB_SZ, 1);
@@ -236,10 +253,7 @@ static void usb_stack_start(void)
     const tinyusb_mtp_storage_config_t sc = { .base_path = MTP_VFS_BASE, .display_name = "DAQ", .removable = false,
                                               .total_bytes = mtp_vfs_capacity(), .free_bytes = 0 };
     ESP_ERROR_CHECK(tinyusb_mtp_register_storage(&sc, NULL));
-    /* POLISH (MTP-R): no INFO trace per MTP transaction (it fills the LOG ring). Errors and warnings stay. */
-    static const char *const quiet[] = { "tinyusb_mtp_transport", "tinyusb_mtp_ops", "tinyusb_mtp_read", "tinyusb_mtp_xfer",
-                                         "tinyusb_mtp_write", "tinyusb_mtp_store", "tinyusb_mtp_prop", "tinyusb_mtp_codec" };
-    for (unsigned i = 0; i < sizeof quiet / sizeof quiet[0]; i++) { esp_log_level_set(quiet[i], ESP_LOG_WARN); }
+    usb_files_log_quiet();
     tinyusb_config_t tc = TINYUSB_DEFAULT_CONFIG();
     tc.task.size = 8192;            /* REVIEW (MTP-V-4): was 6144 (MTP-P-10 P4). The MTP read runs fread -> VFS -> PFS read -> RS decode, plus a log line, in this task */
     ESP_ERROR_CHECK(tinyusb_driver_install(&tc));
