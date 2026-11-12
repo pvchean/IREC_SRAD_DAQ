@@ -289,3 +289,61 @@ Verdict: PASS. The NAND now holds one file. The board is back on `daq_mtp` in th
 ### MTP-HW-12.4 State of the board now
 * Firmware: `daq_mtp` built at commit `27bc4e5`. MODE2 switch: SERIAL position. NAND: one file (id 2, 44 pages, 82544 bytes). SD: none.
 * Next: the user flips MODE2 to FILES and power cycles. The files-mode copy and CRC test can now run on file 2.
+
+## MTP-HW-13 Files mode with the MATLAB serial commands and a real file, board 28:84:85:46:83:04 (2026-11-12 14:57 to 15:04, user at the PC)
+Verdict: PASS. In files mode the serial port does everything the MATLAB "Files & Plot" download needs: `MATLAB PING`, `STREAM OFF`, `FILES`, `CHUNK`. The serial download of file 2 and three MTP copies are byte-identical. NAND writes: zero. Firmware: `daq_mtp` at commit `27bc4e5` (MTP-A), MODE2 low, no SD card, no 5 V. Test only: no build, no flash, no `usbreset`, no `sudo`. Not sent: `REC ON`, `LEAVE`, `DL`, `REBOOT`, `STREAM ON` (sent once, refused). The MATLAB app itself was NOT run: the client is my own Python script with the same commands.
+Scripts (not deliverables): `cli.py`, `dl.py` in the scratchpad (`.../scratchpad/hw13/`). Every serial script sets `dtr=True` (MTP-HW-10.3). The TinyUSB CDC port is `/dev/ttyACM0`. Opening it does NOT reset the board in files mode.
+
+### MTP-HW-13.1 Test 1: bus timeline
+* First attempt (14:57 to 14:58, 66 s): only `303a:1001`, Device 090, node created 14:50:04. The user had not replugged yet. I stopped and reported (no command sent).
+* After the replug: `/dev/ttyACM0` created 14:59:35. At 15:00:08 the bus showed only `303a:4041` (Device 092, "IREC DAQ"). The 1001 grace window itself was NOT observed with a timestamp: the coordinator told me about the replug after it happened. The LOG shows the 10 s countdown and `MTP driver installed` at 12.0 s, so the order was 1001, then 4041.
+* `303a:4041` stayed on the bus until 15:03 (after all tests). Same Device 092. No disconnect.
+* CDC port: answers with `dtr=True`.
+
+### MTP-HW-13.2 Test 2: INFO and LOG
+* `INFO`: `STATUS:OK mode=files rec=0 mounted=1 index=1 blocked_writes=0 nor_blocked=0 lost_pages=0`.
+* `LOG` to `END`: `reset reason 1, USJ pads were clean` (power-on), `FILES MODE (read only): no recording, no sensors, no WiFi`, `pfs: Mount complete (Path A)`, `NAND mounted read only: refused writes nand+nor=0, NOR refused=0`, 10 s countdown, `MTP driver installed`, `MTP storage registered: id=0x00010001 path=/daq name=DAQ total=122945536 free=0`, `files mode running (MTP + CDC)`, `refresh NAND: store says 1, list has 1`, then the SD error lines (no card).
+* DIAG at the first read: `heap_free=54516 heap_min=51576`, stack free TinyUSB=6628 mtp_vfs=5916 cmd=6560 main=3376 led=2120.
+
+### MTP-HW-13.3 Test 3: MATLAB compatibility (exact replies)
+| Command | Reply |
+|---|---|
+| `PING` | `01010101 10101010 DAQBOARD V1 01010101 10101010` |
+| `MATLAB PING` | The same banner line. Then 5 s with no byte at all (0 bytes, no sample lines): no stream started. |
+| `STREAM OFF` | `STREAM:OFF` |
+| `LIST` | `LIST:1 files`, `FILE id=2 flags=0x0000 pages=44 first_offset=0 size=82544`, `LIST:END` |
+| `FILES` | `FILES:BEGIN`, `FILE PFS 2 82544 0000 0`, `FILES:END` (the MATLAB parser reads `bytes=82544`, `start=0`) |
+| `CHECK 2` | `CHECK:OK file=2 records=7613 seq_breaks=0 missing=0 time_back=0 read_errors=0 seq=15467..23079 span_us=7611999 mean_interval_us=999 max_gap_us=1473 ...`; `CHECK:LC records=2538 seq_breaks=0 missing=0 time_back=0 span_us=7610994 mean_interval_us=2999 max_gap_us=3419 ...`; `CHECK:CAL meta_records=6 blocks=1 rev=0 ...` |
+| `STREAM ON`, `DAQS`, `WIFI GET` | `ERR not available in files mode (read-only)` (each) |
+| `CHECK 2 x` (bad argument, my typo) | `CHECK:WARN file=2 records=0 ...` (the argument parser reads `x` as a file id; harmless, no crash) |
+
+Download as the MATLAB app does it (`dl.py`): `STREAM OFF`, wait `STREAM:OFF`, `FILES`, then `CHUNK PFS 2 <off> 16384` with off from `start` (0), reply `CHUNK:<off> <n> <crc32 hex>` plus n raw bytes, until n = 0.
+* Run A (with `DAQS` and `WIFI GET` sent right after the `CHUNK` reply of chunk 0 and of chunk 2, before the next `CHUNK`): 6 requests, chunk sizes 16384 x 4, 15720, 0. Every chunk CRC matched. Total 81256 bytes in 0.11 s. Whole-file CRC32 `5e8cee05`. The refusal lines were skipped by the line search, as the MATLAB `waitLine` does. The download succeeded. `INFO` after: blocked_writes=0 nor_blocked=0 lost_pages=0.
+* Run B (no injection): identical bytes and CRCs. Run C (chunk 4096): identical file. `cmp` of A, B, C: equal.
+* Chunk CRCs: D090F9F9, C1E3E811, 95B1BBD8, 277DC419, 376059D3.
+* SIZE DIFFERENCE: `LIST` and `FILES` say 82544 B, but `CHUNK` ends at 81256 B (10157 records x 8 = 81256 = 7613 PT + 2538 LC + 6 META). The 1288 B difference is 161 records. The MATLAB app uses `bytes` only for the progress bar (`approx`), and it stops at the n = 0 chunk, so it is not a problem. The MTP object size is 81256 (see 13.4). The `FILES` size is likely the raw page payload including the partial last page: not checked in the code.
+* `daq_get.py` cannot run in files mode: its `daqs()` waits for `DAQS:` and `DAQS` is refused, so it ends with "no reply". It was not run. It only uses `STREAM OFF`, `DAQS`, `FILES`, `CHUNK`. The `CHUNK` part is the same as `dl.py`.
+* Decode: `python3 -I tools/bin_to_csv.py dl_plain.bin` gives 10151 samples, calibration rev 0. PT: 7613 samples, interval 526 to 1473 us (mean 999.9999 us), raw count = seq = 15467 .. 23079, step +1 on all 7612 steps, no reset (a ramp over 7.6 s: the sawtooth does not wrap in this recording). LC: 2538 samples, mean interval 2999.998 us (max 3419), raw -2091996 .. -2089459. This matches `CHECK`.
+
+### MTP-HW-13.4 Test 4: MTP (kioclient5)
+* `kioclient5 ls "mtp:/IREC DAQ/DAQ/NAND"`: `NAND_F00002D2.BIN`. `SD` is empty. (The name has `D2` = board id 2; the file id is 2.)
+* Size by `kioclient5 stat`: 81256 B. This is the same as the serial download, not 82544.
+* 3 copies (destination must be an absolute path: a relative path made kioclient5 say "Unknown host" and copied nothing): 0.33, 0.31, 0.41 s. Each: 81256 B, CRC32 `5e8cee05`, md5 `c09119cb...0c57`. The three files and the serial download are byte-equal (`cmp`, md5). The MTP read log says `first=4084`; both ways give the same bytes.
+* `ptp_probe`: built in the scratchpad with gcc (host tool, not firmware), run with `-s 5`. `claim interface 2: LIBUSB_ERROR_BUSY` (`kiod6` holds the interface). Not repeated. No stage ran.
+
+### MTP-HW-13.5 Test 5: soak
+* 10 more copies, 0.30 to 0.32 s each, all 81256 B, all the same md5. `INFO` after each: `mode=files rec=0 mounted=1 blocked_writes=0 nor_blocked=0 lost_pages=0` (10 of 10). Bus still `303a:4041` Device 092.
+* LOG after the soak (ring holds the last 48 lines): no E or W line, no `refus` line. Each copy shows `MTP object read begin ... bytes=81256 object_size=81256` and `read complete ... sent=81256/81256 result=0`.
+* DIAG after 13 copies and many serial sessions: `heap_free=54752 heap_min=47548`, stack free TinyUSB=5700 mtp_vfs=5916 cmd=5744 main=3376 led=2120. The minimum heap fell from 51576 to 47548 B and two stack margins fell by 0.8 to 0.9 KB while MTP and CDC ran together. The margins stay positive. No reset (no new boot text).
+
+### MTP-HW-13.6 Verdict on MATLAB serial compatibility in files mode
+* Works: connect (`MATLAB PING` banner, no stream), `pauseSerial` (`STREAM OFF` gives `STREAM:OFF`), `queryFiles` (`FILES`), `getFile` (`CHUNK`, CRC per chunk, end by n = 0), refused commands in the middle of a download (`DAQS`, `WIFI GET`) do no harm. Serial and MTP give the same bytes.
+* The apps still send, and get a refusal for: `DAQS` every 2 s (Calibration App), `WIFI GET` every 5 s (Live Monitor USB source), `STREAM ON` in `resumeSerial`. All three give one `ERR` line, which the apps skip. `CAL`, `WIFI SET` and the other write commands stay refused, so the calibration and WiFi dialogs do not work in files mode (as designed).
+* UNVERIFIED: the real MATLAB app (serialport at 115200 with its own DTR handling, `readline` timing, the Java/table CRC) was not run. Only the same command sequence from Python was run.
+
+### MTP-HW-13.7 Problems and notes
+1. The `MTP trace` lines at INFO level are back in the LOG ring (MTP-HW-7.1 said they were gone). They fill the 6 KB ring: after 13 copies the boot lines had wrapped out. A flight build should lower the level (see MTP-HW-6.4).
+2. `FILES`/`LIST` size (82544) is larger than the readable size (81256). Cosmetic for MATLAB, visible to anyone who compares the two numbers.
+3. `CHECK 2 x` is accepted without an error (reads `x` as 0 or 1 file).
+4. `kioclient5 copy` needs an absolute destination.
+5. 1001 grace window not timed (see 13.1). The bus timeline for the 30 s after the replug was not recorded.
