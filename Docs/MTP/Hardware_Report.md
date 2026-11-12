@@ -347,3 +347,44 @@ Download as the MATLAB app does it (`dl.py`): `STREAM OFF`, wait `STREAM:OFF`, `
 3. `CHECK 2 x` is accepted without an error (reads `x` as 0 or 1 file).
 4. `kioclient5 copy` needs an absolute destination.
 5. 1001 grace window not timed (see 13.1). The bus timeline for the 30 s after the replug was not recorded.
+
+## MTP-HW-14 Crash recovery for panic, abort, interrupt watchdog and task watchdog; MTP trace level fix (2026-11-12 15:05 to 16:10, user at the PC)
+Verdict: SAFE on this PC (Linux 7.2, xHCI, kiod6). 8 of 8 crash cycles recovered with no human, no replug and no stale device. The panic types are as good as the task watchdog: the host sees a disconnect at the reset each time. MTP-V-1 did NOT appear. The fix MTP-V-1.3 is not needed on this evidence and is NOT applied. NAND writes: zero. Not sent: `REC ON`, `LEAVE`. No `daq` or `daq_sim` flash, no `usbreset`, no `sudo`.
+Board: serial 28:84:85:46:83:04, MODE2 low, no SD card, no 5 V, file id 2 (`NAND_F00002D2.BIN`, 81256 B, md5 c09119cb). Test build: `daq_mtp_force` at commit `a567f8b` (flashed by CDC `DL` and `pio run -t upload`, hash verified, 4041 about 12 s after the flash).
+Method: as MTP-HW-8. `lsusb` and `/dev/ttyACM0` every 0.5 s from 5 s before to 45 s after the command. Times are seconds after the command. They have 0.5 s resolution. After each cycle: CDC `INFO`, `LOG` (reset reason, DIAG), one `kioclient5 copy` with md5, and `journalctl -k`.
+NOTE: a Claude Code restart cleared the scratchpad. The raw timeline files are lost. The numbers below were copied from the run output before that.
+
+### MTP-HW-14.1 Crash table
+| Cycle | Command (what it does) | Reset reason in LOG | Host sees disconnect | 303a:1001 | 303a:4041 + ttyACM | Stale device | INFO after | Copy after |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+| 1 | `HANG` (USB task blocked, 8 s task WDT) | 6 (task WDT) | 8.8 | 9.3 | 20.3 | no | clean | md5 c09119cb |
+| 2 | `HANG` | 6 | 8.8 | 9.3 | 20.3 | no | clean | md5 c09119cb |
+| 3 | `ABORT` (`abort()`) | 4 (panic) | 0.8 | 1.3 | 12.8 | no | clean | md5 c09119cb |
+| 4 | `ABORT` | 4 | 0.8 | 1.3 | 12.8 | no | clean | md5 c09119cb |
+| 5 | `CRASH` (store to address 0) | 4 (panic) | 0.8 | 1.3 | 12.8 | no | clean | md5 c09119cb |
+| 6 | `CRASH` | 4 | 0.8 | 1.3 | 12.8 | no | clean | md5 c09119cb |
+| 7 | `INTWDT` (interrupts off in a loop) | 5 (interrupt WDT) | 1.8 | 2.3 | 13.3 | no | clean | md5 c09119cb |
+| 8 | `CRASH` during a `kioclient5 copy` loop | 4 | 0.9 (reads fail from 0.7) | 1.4 | 12.9 | no | clean | first good read at 12.5, md5 c09119cb |
+* "Clean" INFO = `mode=files rec=0 mounted=1 index=1 blocked_writes=0 nor_blocked=0 lost_pages=0` after every cycle.
+* Every cycle: the 1001 window lasts 11 s (the grace countdown), then the host sees a second disconnect and a new 4041. The kernel log shows, per cycle, exactly: `USB disconnect, device number N`, `new full-speed USB device number N+1` (1001), `USB disconnect`, `new full-speed ... N+2` (4041). The device number grows each time, so the host never keeps the old address. No xhci error, no `device not accepting address`, no `cdc_acm` error. Other USB devices stayed on the bus (13 lines in `lsusb`, 12 only in the 0.5 s gaps).
+* Time with no MTP: about 20.3 s after a task-WDT hang (8.8 s wait for the WDT + 11.5 s), about 12.8 s after a panic or interrupt WDT (the reset is immediate).
+* `ABORT` and `CRASH` both show reset reason 4 (panic): the silent-reboot setting hides the message, so the log cannot tell them apart. The null store is a real fault (it ends in a panic reset, not a hang).
+* Cycle 8 (crash in a copy): the running copy failed 0.7 s after the command (when the host saw the disconnect), not after 8 s as with `HANG`. Then 102 copy tries failed fast (0.07 s each) until 4041 came back. 169 of 271 copies in the loop were good (all before the crash and after the recovery: the first good copy was at 12.5 s). Every failed copy leaves no or a partial file: an application must delete it. No bad copy had a wrong md5 (all copies with rc 0 had the right size and md5).
+* LOG after each cycle: `reset reason N, USJ pads were clean`, the 10 s countdown, `files mode running (MTP + CDC)`. DIAG: `heap_free=54516 heap_min=51576` (same as before), TinyUSB stack free 5860 to 6628. No sign of memory damage.
+* Also seen: a power-on boot (reset reason 1) after the Claude Code restart, 4041 up, same state, copy md5 c09119cb.
+
+### MTP-HW-14.2 Verdict and risk for the DAQ
+* A panic, abort, store fault, interrupt watchdog and task watchdog all end in a clean disconnect on this host, a new 1001 window, then 4041 with working MTP and CDC. The way back (`DL`) worked after the cycles, so no BOOT button was needed.
+* Why the host sees a disconnect after a panic is not proven. The software reset (and the bootloader) probably drops D+ for a short time on this chip. MTP-V-1.1 feared a stale device: it does not show here, with the HANG result of MTP-HW-8 and 3 more crash types. The IDF panic path, not our code, is the likely reason.
+* Not proven: (1) other hosts (Windows, macOS, a USB hub, another xHCI chip). (2) A crash in serial/recording mode (`daq`): `daq_mtp` serial mode has no MTP, and none of the test commands exist there. (3) A crash with a bulk transfer in a partly sent state on other hosts (only kioclient5 was tested). (4) A brown-out or a hard power loss (not a software crash). For a flight, MTP is not used: the board is in serial mode and the host does not need the USB.
+* If a stale device ever appears: MTP-V-1.3 (IRAM crash hook) is the candidate. It needs the user's decision and its own hardware proof.
+
+### MTP-HW-14.3 Code changes (commit `a567f8b`, REVIEW (MTP-C), Deviation Log row added)
+* `src/usb_files.c`: CDC test commands `ABORT`, `CRASH`, `INTWDT` next to `HANG`, only with `-DUSB_FILES_TEST_CMDS=1` (env `daq_mtp_force`). The strings `HANG`, `ABORT`, `CRASH`, `INTWDT` are in the `daq_mtp_force` image and NOT in the `daq_mtp` image (checked with `strings` on the ELF).
+* MTP trace lines at INFO (MTP-HW-13 problem 7), CAUSE FOUND: `src/cmd.c` `do_chunk()` ends with `esp_log_level_set("*", ESP_LOG_INFO)`. A call with "*" removes every per-tag level (IDF `log_level_set`: `esp_log_linked_list_clean()`). So the first serial `CHUNK` (a MATLAB download) removed the 8 WARN levels that `usb_stack_start()` had set, and the trace lines came back. FIX: the tag list is now `usb_files_log_quiet()` (`usb_files.c`, declared in `usb_files.h`). `usb_stack_start()` calls it, and `do_chunk()` calls it after the "*" reset (under `DAQ_MTP_USB`). The `daq` build does not change. The same "*" reset exists in `stream.c`; it runs only when the stream was on, which does not happen in files mode.
+* Builds `daq_mtp_force` and `daq_mtp`: no warning. `nm`: 6 `T tud_mtp_*_cb` symbols in `daq_mtp`. Host test `tools/mtp_hosttest/run.sh`: 8427 passed, 0 failed.
+
+### MTP-HW-14.4 Final firmware and Part 2 check on the board
+* Flashed: `daq_mtp` (normal build) at code commit `a567f8b`, by CDC `DL` from the force build, `pio run -e daq_mtp -t upload`, hash verified. MODE2 low (FILES). Bus: 1001 first seen 1 s after the flash command, 4041 at about 12 s. INFO clean.
+* Part 2 check: 2 serial `CHUNK` commands (`STREAM OFF`, `CHUNK PFS 2 0 16384`, `CHUNK PFS 2 16384 16384`: CRC D090F9F9 and C1E3E811, the same as MTP-HW-13), then 3 `kioclient5` copies (81256 B, md5 c09119cb each). LOG: 29 lines, 0 `MTP trace` lines, boot lines present (`reset reason 11`, `FILES MODE`, `Mount complete`, `NAND mounted read only`, `MTP driver installed`, `files mode running`) and the DIAG line (`heap_free=54512 heap_min=47548`, TinyUSB 5716, mtp_vfs 5916, cmd 6560, main 3488, led 2120). INFO after: clean. A further `CHUNK` after the LOG read worked (CRC 96A23C45 for the first 4096 B).
+* The long soak of MTP-HW-13.5 (the ring wrapping after 13 copies) was not repeated; 3 copies gave 0 trace lines. The trace lines are lowered at run time; the first `MTP object read` lines at WARN do not appear.
