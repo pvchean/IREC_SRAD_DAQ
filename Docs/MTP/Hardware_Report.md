@@ -195,3 +195,27 @@ This build in serial mode is the full DAQ firmware: sensors, chain, `pfs_writer`
 6. MODE1: with MODE1 high at boot the board must NOT record (`io_rec_disable()`: log line `daq_mtp build: recording is disabled`). The AUTOREC LED must stay off.
 7. Watchdog: `daq_mtp.defaults` sets TWDT 8 s, panic, silent reboot for both modes. In serial mode a blocked task would reset the board with no message (the log shows `reset reason 6` after the reboot). Watch 2 minutes of normal run: there must be no unexpected reboot (the USB 1001 device must not disconnect). `HANG` does not exist in this image, so the watchdog cannot be forced. Debug serial mode with `daq`, not `daq_mtp`.
 8. Return to files mode: flip the switch to low and power cycle (or CDC/serial `DL` and a flash). Expected: 1001 for about 10 s, then 4041.
+
+## MTP-HW-10 Different board: identify, flash `daq_mtp`, files mode with MODE2 low (2026-11-12 14:2x, user at the PC)
+Verdict: PASS for files mode on a second board. This board has an EMPTY NAND (no file). NAND writes: zero. No `REC ON`, no `LEAVE`, no `daq` flash, no `usbreset`, no `sudo`. The serial-position check (MTP-HW-9.4) is NOT done yet.
+
+### MTP-HW-10.1 Board identification
+* Serial/JTAG serial number (`lsusb -v`): `28:84:85:46:83:04` (MAC 28:84:85:46:83:04). In files mode, TinyUSB string `288485468304`. The spike board in Spike_Report.md MTP-HW had `2884854684E0`: this is a different board.
+* Chip rev v0.2. NAND: `usable_blocks=1018 retired=6` (the first board: 1019).
+* Firmware found (before the flash): plain `daq` build, version `fa2d136-dirty`, compile time Oct 30 2026 20:56. It ran in serial style (`303a:1001` for 20+ s) with MODE2 low, because plain `daq` ignores MODE2. Boot line: `io: mode1=manual mode2=files addr=2`. `STATUS:OK rec=0 auto=0 mounted=1 file=2 usable_blocks=1018 sd=0`. No ADS1115 (0x48), no NAUâ7802 (0x2A) answer. SD init failed every 2 s (no card). No recording was running, so `REC OFF` was not sent.
+* WARNING for the serial port: on this plain `daq` firmware, opening `/dev/ttyACM0` resets the board (USB Serial/JTAG DTR/RTS). Every open gave a fresh boot (`up_s=1`). With MODE1 high this would start a recording. MODE1 was manual here.
+
+### MTP-HW-10.2 Build and flash
+* Commit: `358a709`. `pio run -e daq_mtp`: SUCCESS, RAM 64.7 %, flash 27.7 % (1162189 B). `nm`: `T` for the six `tud_mtp_*_cb`. String `HANG`: count 0. `tools/mtp_hosttest/run.sh`: 8427 passed, 0 failed.
+* Flash: `pio run -e daq_mtp -t upload --upload-port /dev/ttyACM0` (serial mode, auto reset): 1162624 B, `Hash of data verified`.
+* Bus after the flash: `303a:1001` for about 6 s, then `303a:4041` (IREC DAQ). It stayed 4041 for 35 s and again about 60 s later. Files mode, as expected.
+
+### MTP-HW-10.3 Files-mode checks
+* IMPORTANT: the TinyUSB CDC answers only when the host sets DTR. With `dtr=False` there is NO reply to any command (INFO, PING). Use `serial.Serial(...); s.dtr=True`. The same tool works with `dtr=False` in serial mode.
+* `INFO`: `STATUS:OK mode=files rec=0 mounted=1 index=1 blocked_writes=0 nor_blocked=0 lost_pages=0` (also after 60 s).
+* `PING`: `01010101 10101010 DAQBOARD V1 01010101 10101010`. This is what MATLAB needs.
+* `MATLAB PING`: `ERR not available in files mode (read-only)`. If a MATLAB app sends the text `MATLAB PING` (not `PING`) it gets no `DAQBOARD V1` in files mode. Check which command the apps send.
+* `LOG` to `END`: reset reason 11, `FILES MODE (read only)`, `NAND mounted read only: refused writes nand+nor=0`, 10 s countdown, TinyUSB installed, `files mode running (MTP + CDC)`, `refresh NAND: store says 0, list has 0`, the SD error (no card). DIAG: `heap_free=54516 heap_min=51576`, free stack TinyUSB=6628 mtp_vfs=5916 cmd=6560 main=3488 led=2120.
+* `LIST`: `LIST:0 files`. `FILES`: empty. `CHECK` gives `ERR no file 2`. `SDLS`: `ERR no card`. So this NAND is empty: no file to copy, no CRC test. The 3-copy test was NOT run.
+* `kioclient5 ls "mtp:/IREC DAQ/DAQ"` lists `NAND` and `SD`; `NAND` is empty. `ptp_probe` not run: `kiod6` holds the interface.
+* Not tested: a copy of a real file on this board (needs a recording: user decision), serial position (MTP-HW-9.4), 3-minute run (only about 2 minutes of files-mode run seen, no reset).

@@ -190,3 +190,7 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 ## MTP-HW-9 (11 Nov, user at the PC): switch test step 1 PASS. See Hardware_Report.md MTP-HW-9.
 * Env `daq_mtp` (no force) is on the board, MODE2 switch in FILES position (GPIO 2 low): 1001 for the grace window, then 4041. INFO mode=files blocked_writes=0 nor_blocked=0 lost_pages=0. 3 kioclient5 copies CRC f3d49e4f. `HANG` is refused in this image (string absent). nm T x6, host test 8427/8427. NAND writes: zero.
 * Next: the user flips MODE2 to the serial position and power cycles; check list in MTP-HW-9.4 (only 1001, no 4041, DAQ banner, INFO mode=serial, rec locked, no TinyUSB, no WDT reboot). No LEAVE, no REC ON.
+
+## MTP-HW-10 (12 Nov, user at the PC): a DIFFERENT board (serial 28:84:85:46:83:04), see Hardware_Report.md MTP-HW-10.
+* Found plain `daq` (fa2d136-dirty, Oct 30), rec=0. Flashed `daq_mtp` (358a709) with a normal pio upload (hash ok). MODE2 low: 1001 about 6 s, then 4041, stable. INFO mode=files blocked_writes=0 nor_blocked=0 lost_pages=0. PING gives `DAQBOARD V1`; `MATLAB PING` is refused in files mode. This NAND is EMPTY (LIST 0 files), so no copy/CRC test. Rule: the TinyUSB CDC needs DTR=1, else no reply. NAND writes: zero.
+* Next: flip MODE2 high, power cycle, run MTP-HW-9.4 (serial position).
