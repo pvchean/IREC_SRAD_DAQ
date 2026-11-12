@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Paul Chean
+#
+# partitions_pfs.csv: the partition table of the 16 MB NOR flash.
+# pfs_nor holds the LittleFS NOR store (HAL-V3-7.4).
+#
+# Spec:    HAL-V3-7.7.6
+# Related: HAL-V3-7.4, HAL-V3-7.1
+#
+# Name,    Type, SubType,  Offset,   Size
+nvs,       data, nvs,      0x9000,   0x5000
+phy_init,  data, phy,      0xE000,   0x1000
+factory,   app,  factory,  0x10000,  0x400000
+pfs_nor,   data, littlefs, 0x410000, 0x100000

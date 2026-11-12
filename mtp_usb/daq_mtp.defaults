@@ -1,0 +1,18 @@
+# sdkconfig defaults for the env daq_mtp only (loaded after sdkconfig.defaults by the top CMakeLists.txt).
+# Source: tools/mtp_spike/sdkconfig.defaults (MTP-P-3.3 and P4). Delete sdkconfig.daq_mtp after you edit this file.
+# TinyUSB: composite CDC + MTP, one MTP storage (the shim has root folders NAND and SD).
+CONFIG_TINYUSB_CDC_ENABLED=y
+CONFIG_TINYUSB_MTP_ENABLED=y
+CONFIG_TINYUSB_MTP_MAX_STORAGES=1
+CONFIG_TINYUSB_DESC_PRODUCT_STRING="IREC DAQ"
+CONFIG_TINYUSB_DESC_CDC_STRING="IREC DAQ serial"
+CONFIG_TINYUSB_DESC_MTP_STRING="IREC DAQ MTP"
+# Files-mode safety (MTP-P-10 P4): the USB task feeds the task watchdog (fork tinyusb_task.c). A hang panics and reboots in 8 s.
+# A silent reboot: a panic print to the USB Serial/JTAG console would block while TinyUSB owns the PHY.
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=8
+CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT=y
+CONFIG_TINYUSB_DEBUG_LEVEL=0
+CONFIG_TINYUSB_MTP_TRACE_WRITES=y
+# POLISH (MTP-R): main task stack 3584 -> 5632 (+2 KB). Measured free stack of main was 1376 B (Hardware_Report.md MTP-HW-6.4).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=5632

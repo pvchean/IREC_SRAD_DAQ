@@ -14,6 +14,11 @@
 
 static const char *TAG = "io";
 static bool s_auto, s_files;
+static volatile bool s_rec_locked, s_isr_ready;
+/* One-time "serial mode" request over a software reset (files_mode_leave). RTC no-init RAM keeps its value over esp_restart() and
+   has random content after a power-up, so the flag is two words that must match: magic and its complement. */
+#define LEAVE_MAGIC 0x53455249U         /* "SERI" */
+static RTC_NOINIT_ATTR uint32_t s_leave_a, s_leave_b;
 static uint8_t s_addr;
 static volatile bool s_rec;
 static volatile int64_t s_last_us;
@@ -42,9 +47,21 @@ void io_init(void)
 
     s_auto  = gpio_get_level(MODE1_PIN) != 0;
     s_files = gpio_get_level(MODE2_PIN) == 0;
+#if defined(DAQ_MTP) && defined(DAQ_MTP_FORCE_FILES)
+    s_files = true;                     /* test env daq_mtp_force: files mode with no switch on MODE2 (LEAVE below still gives serial mode once) */
+#endif
+    if (s_leave_a == LEAVE_MAGIC && s_leave_b == ~LEAVE_MAGIC) {      /* files_mode_leave() asked for serial mode, once */
+        ESP_LOGW(TAG, "files mode skipped once: serial mode");
+        s_files = false;
+    }
+    s_leave_a = 0U; s_leave_b = 0U;
     s_addr  = (uint8_t)((gpio_get_level(ADDR2_PIN) << 2) | (gpio_get_level(ADDR1_PIN) << 1) | gpio_get_level(ADDR0_PIN));
     s_rec   = s_auto;
     ESP_LOGI(TAG, "mode1=%s mode2=%s addr=%u", s_auto ? "auto-record" : "manual", s_files ? "files" : "serial", s_addr);
+#ifdef DAQ_MTP
+    io_rec_disable();                   /* this build never records: no auto record, no button (the ISR is removed below) */
+    ESP_LOGW(TAG, "daq_mtp build: recording is disabled");
+#endif
 
     /* The button pulls MODE1 to ground. It works in auto mode only; in manual mode the switch holds the
        line low, and the REC ON / REC OFF command controls the recording. */
@@ -53,10 +70,23 @@ void io_init(void)
     gpio_config(&bc);
     gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
     gpio_isr_handler_add(MODE1_PIN, button_isr, NULL);
+    s_isr_ready = true;
+    if (s_rec_locked) { gpio_isr_handler_remove(MODE1_PIN); }
+}
+
+void io_rec_disable(void)
+{
+    s_rec_locked = true;
+    s_auto = false;                     /* the button ISR does nothing, and the AUTOREC LED is off */
+    s_rec = false;
+    if (s_isr_ready) { gpio_isr_handler_remove(MODE1_PIN); }
 }
 
 bool io_auto_mode(void)      { return s_auto; }
 bool io_usb_files_mode(void) { return s_files; }
 uint8_t io_addr(void)        { return s_addr; }
 bool rec_get(void)           { return s_rec; }
-void rec_set(bool on)        { s_rec = on; }
+void rec_set(bool on)        { if (!on || !s_rec_locked) { s_rec = on; } }
+bool rec_locked(void)        { return s_rec_locked; }
+
+void io_request_serial_once(void) { s_leave_a = LEAVE_MAGIC; s_leave_b = ~LEAVE_MAGIC; }

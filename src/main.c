@@ -21,9 +21,15 @@
 #include "cal.h"
 #include "chain.h"
 #include "cmd.h"
+#include "files_mode.h"
+#ifdef DAQ_MTP_USB
+#include "usb_files.h"
+#endif
 #include "io.h"
 #include "led_sr.h"
+#include "mtp_store_pfs.h"
 #include "nand_test.h"
+#include "nor_ro.h"
 #include "nau7802.h"
 #include "profile.h"
 #include "record.h"
@@ -47,6 +53,7 @@ static SemaphoreHandle_t s_sink_lock;
 static StaticSemaphore_t s_sink_lock_struct;
 
 static bool s_was_rec;
+static volatile bool s_fm_error;               /* files mode: the NAND did not mount */
 static int64_t s_cal_last_us;
 
 /* The calibration block (cal.h): 6 META records one after another, so the sink lock is held. It goes into the PFS file and the
@@ -179,6 +186,7 @@ static void led_task(void *a)
         /* The load cell is optional: only a load cell that stopped after it ran is an error. */
         bool err = !s_pfs || st.degraded || st.no_storage || st.nor_failed || st.dropped_bytes > 0 ||
                    (!sensor && n > 60) || nau7802_fault();
+        if (files_mode_active()) { err = s_fm_error; }          /* no sensors in files mode; the mount decides (MTP-B-2) */
         led_set(LED_WORKING, (n / 8) % 2 == 0);
         led_set(LED_RECORDING, rec_get());
         led_set(LED_AUTOREC, io_auto_mode());
@@ -217,9 +225,57 @@ static void toggle_task(void *a)
 static void writer_task(void *a) { pfs_writer_run((pfs_ctx_t *)a); }
 static void scan_task(void *a)   { pfs_scan_run((pfs_ctx_t *)a); vTaskDelete(NULL); }
 
+#ifdef DAQ_MTP
+/* Files-mode boot (MTP-B-2): a read-only drive. No sensors, no chain, no stream, no SD logger, no WiFi, no pfs_writer, no
+   recording. Nothing here calls pfs_writer_run(), pfs_ingest(), pfs_flush(), sd_log_start(), or stream_start(). */
+#define FM_MOUNT_TRIES 10
+static void files_mode_main(const pfs_config_t *cfg, const pfs_os_hal_t *os, const spi_bus_esp32s3_cfg_t *bus_cfg,
+                            const pfs_nor_littlefs_cfg_t *nor_cfg)
+{
+    files_mode_set_active(true);
+#ifdef DAQ_MTP_USB
+    usb_files_log_start();                                      /* log ring for the CDC command LOG */
+#endif
+    io_rec_disable();                                           /* also done in io_init(); the second guard */
+    ESP_LOGW(TAG, "FILES MODE (read only): no recording, no sensors, no WiFi");
+    xTaskCreatePinnedToCore(led_task, "led", 3072, NULL, 1, NULL, 0);
+
+    if (pfs_early_init(&s_pfs, os, cfg) != PFS_OK) {
+        ESP_LOGE(TAG, "pfs_early_init failed");
+        s_pfs = NULL;                                           /* the LED task shows the error */
+        s_fm_error = true;
+    } else {
+        const spi_bus_hal_t *bus  = spi_bus_esp32s3_get(bus_cfg);
+        const nand_hal_t    *nand = nand_zd35q1gc_bind(bus);
+        const pfs_nor_hal_t *nor  = nor_ro_littlefs_get(nor_cfg);        /* read only, never formats */
+        pfs_err_t e = PFS_ERR_INVALID_ARG;
+        for (int i = 0; i < FM_MOUNT_TRIES && e != PFS_OK; i++) {
+            e = (nand && nor) ? mtp_pfs_mount_readonly(s_pfs, nand, nor) : PFS_ERR_INVALID_ARG;
+            if (e != PFS_OK) { ESP_LOGE(TAG, "read-only mount failed (%d), try again in 1 s", (int)e); vTaskDelay(pdMS_TO_TICKS(1000)); }
+        }
+        if (e == PFS_OK) {
+            (void)xTaskCreateStaticPinnedToCore(scan_task, "pfs_scan", SCAN_STACK, s_pfs, 2, s_scan_stack, &s_scan_tcb, 1);
+            (void)mtp_store_pfs_init(s_pfs);
+            ESP_LOGI(TAG, "NAND mounted read only: refused writes nand+nor=%lu, NOR refused=%lu",
+                     (unsigned long)mtp_pfs_blocked_writes(), (unsigned long)mtp_pfs_blocked_nor_writes());
+        } else {
+            s_fm_error = true;                                  /* the SD folder can still work */
+        }
+    }
+    (void)mtp_store_sd_init();
+    if (s_pfs) { cmd_start(s_pfs); }                            /* the serial commands on the console backend (stub until USB) */
+    files_mode_usb_start();                                     /* the USB code; the weak default idles */
+    for (;;) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+}
+#endif
+
+
 void app_main(void)
 {
     /* io_init() ran above: the ADDR2..ADDR0 pins (0..7) are the device ID in each PFS page header. */
+#ifdef DAQ_MTP_USB
+    usb_files_early_init();                    /* FIRST: repair a dirty USB Serial/JTAG pad, PHY to the USB Serial/JTAG (Spike_Report.md MTP-P-11) */
+#endif
     PROF(P_APP_MAIN);
 #ifdef DAQ_NANDREAD
     nand_read_test();                          /* reads only, no mount */
@@ -235,6 +291,9 @@ void app_main(void)
     led_sr_init();
     io_init();                                 /* the level of the mode pins sets recording at power-up */
     PROF(P_IO);
+#ifdef DAQ_MTP
+    if (io_usb_files_mode()) { files_mode_main(&cfg, os, &bus_cfg, &nor_cfg); }   /* never returns; nothing below runs */
+#endif
     cal_init();                                /* the calibration values come from the flash */
     telem_init();                              /* the WiFi mode from the flash (OFF = nothing else happens); no radio yet */
     xTaskCreatePinnedToCore(led_task, "led", 3072, NULL, 1, NULL, 0);

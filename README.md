@@ -22,8 +22,8 @@ Library: Paranoid-FS v0.3.1 (`src/idf_component.yml`).
 **Build with PlatformIO's own `pio`:** `~/.platformio/penv/bin/pio run -e daq`. The `pio` of the system (`/usr/bin/pio`) runs esptool with `/usr/bin/python`, which has no `intelhex` module, so the build stops at `bootloader.bin` with `No module named 'intelhex'`. The error does not come from the source code. To use the system `pio`, install the module in the system Python.
 
 ## Pins
-Mode 1 = GPIO 1 (high: auto-record, low: manual; the button pulls it low), Mode 2 = GPIO 2 (high: serial,
-low: files; not used yet), ADDR0/1/2 = GPIO 9/48/38 = device ID 0..7. All other pins: `src/board.h`.
+Mode 1 = GPIO 1 (high: auto-record, low: manual; the button pulls it low), Mode 2 = GPIO 2 (high: serial;
+MODE2 low = files mode (USB MTP, read-only; only in the daq_mtp build, in development; see Docs/MTP/)), ADDR0/1/2 = GPIO 9/48/38 = device ID 0..7. All other pins: `src/board.h`.
 
 | Bus | SDA | SCL | Ready pin | Device |
 | :-- | :-- | :-- | :-- | :-- |

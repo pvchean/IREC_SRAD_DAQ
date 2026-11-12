@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=6.1,<6.2"
+  # Stock: the registry version. Fork: the local copy with the MTP changes (read-only, plain VFS).
+  espressif/esp_tinyusb:
+    version: "3.0.0"
+    override_path: "../../../mtp_usb/fork/esp_tinyusb"
