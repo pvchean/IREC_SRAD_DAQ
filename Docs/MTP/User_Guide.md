@@ -51,9 +51,9 @@ A `.BIN` file holds raw records (PT and load cell). It is not a text file.
 The board also shows a serial port (CDC), for example `/dev/ttyACM0` or `COMx`, while MTP runs. Use it with any terminal. End each command with Enter.
 * Commands that give information: `INFO` (state), `LOG` (last log lines, ends with a `DIAG` line, then `END`).
 * Commands that change the mode: `REBOOT` (restart, back to files mode, no replug), `DL` (download mode, to flash new firmware). Do NOT use `LEAVE`: it starts serial mode with a read-write NAND.
-* Other allowed commands: `PING`, `LED`, `LIST`, `FILES`, `SDLS`, `CHUNK`, `CHECK`, `DUMP`. Everything else gives `ERR not available in files mode (read-only)`.
+* Other allowed commands: `PING`, `MATLAB PING`, `STREAM OFF`, `LED`, `LIST`, `FILES`, `SDLS`, `CHUNK`, `CHECK`, `DUMP`. Everything else gives `ERR not available in files mode (read-only)`.
 * `REC ON` and `FORMAT` do not work. This is on purpose.
-* MATLAB apps: `DAQ_Calibration_App` and `DAQ_Live_Monitor` scan all ports and send `MATLAB PING`. They expect the answer `DAQBOARD V1`. In files mode the allowlist has `PING`, but we did not check that the answer has this text. UNVERIFIED. Live data does not exist in files mode. Use the apps in normal serial mode.
+* MATLAB apps: `DAQ_Calibration_App`, `DAQ_Live_Monitor` and `DAQ_Validation_Viewer` scan all ports and send `MATLAB PING`. They expect the answer `DAQBOARD V1`. The files-mode firmware now allows `MATLAB PING` (it prints the banner and starts nothing) and `STREAM OFF` (the "Files & Plot" download needs its reply). UNVERIFIED with the real app: only a code read and a host test of the command list (Boot_Integration.md MTP-A). Live data does not exist in files mode. Use the live functions in normal serial mode.
 
 ## MTP-U-8 Back to normal serial mode
 1. Set the MODE2 switch high.
@@ -92,7 +92,7 @@ The micro SD card is not installed yet. The `SD` folder is empty. This is correc
 | macOS with OpenMTP, `ptpcamerad` | UNTESTED |
 | Copy of a file larger than 1 MB, or a 100 MB file | UNTESTED (speed is an estimate) |
 | SD card files | UNTESTED, no card |
-| MATLAB app finds the board in files mode | UNVERIFIED |
+| MATLAB app finds the board in files mode | UNVERIFIED (the `MATLAB PING` reply is allowed now, MTP-A; not run with the real app) |
 | `LEAVE` | Never tested. Do not use. |
 | Crash recovery (watchdog reset in files mode) | UNTESTED on hardware |
 | LED indications in files mode | From the code, not checked |

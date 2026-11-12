@@ -32,7 +32,7 @@ Author: integration agent. Date: 2026-11-11. Branch `mtp-usb-mode`. Language: AS
 
 Files-mode boot order: `files_mode_set_active`, `io_rec_disable`, `led_task`, `pfs_early_init`, bus, NAND bind, `nor_ro_littlefs_get`, `mtp_pfs_mount_readonly` (10 tries), `pfs_scan` task, `mtp_store_pfs_init`, `mtp_store_sd_init`, `cmd_start`, `files_mode_usb_start()`, then idle.
 NOT started: sensors, chain, `pfs_writer`, stream, `sd_log`, telem/WiFi, `cal_init`, `telem_init`.
-Files-mode commands: PING, LED, LIST, FILES, SDLS, CHUNK, CHECK, DUMP, INFO/STATUS (own line with `blocked_writes`), REBOOT (restart, no flush), LEAVE (serial mode once). All others: `ERR not available in files mode (read-only)`.
+Files-mode commands: PING, LED, LIST, FILES, SDLS, CHUNK, CHECK, DUMP, INFO/STATUS (own line with `blocked_writes`), REBOOT (restart, no flush), LEAVE (serial mode once), and since MTP-A `MATLAB PING` and `STREAM OFF` (see MTP-A below). All others: `ERR not available in files mode (read-only)`.
 
 ## MTP-B-4 No write path (read from code)
 
@@ -62,3 +62,35 @@ Date: 2026-11-11. Build: `pio run -e daq_mtp` passed (RAM 51.9 %, flash 25.4 %).
 The symbol type is `W` (weak). The weak default is linked.
 The weak-link test (MTP-B-6) is not done. This check only shows that the symbol exists.
 No board was flashed.
+
+## MTP-A MATLAB connect and file download in files mode (REVIEW (MTP-A), 2026-11-12)
+
+Problem (Hardware_Report.md MTP-HW-10.3): `MATLAB PING` was refused in files mode. The MATLAB apps send `MATLAB PING` and wait for the banner. They could not find the board.
+
+### MTP-A-1 What the apps send (read from `src/*.m`, not run)
+| Step | Command | Needed in files mode? |
+|---|---|---|
+| Connect (Calibration App, Live Monitor, Validation Viewer): scan, open port at 115200, wait 1.5 s, look for the banner | `MATLAB PING` | YES. Now allowed. |
+| Calibration App, every 2 s after connect | `DAQS` | No. The reply only fills a label. A refusal line is ignored by the app. |
+| Live Monitor USB source, every 5 s | `WIFI GET` | No. The reply only shows WiFi state. Refused: the app ignores it. |
+| Files & Plot, before a file list or a download (`pauseSerial`) | `STREAM OFF`, then waits up to 5 s for `STREAM:OFF` | YES. Without the reply the app stops with a timeout error. Now allowed. |
+| File list | `FILES` (reply `FILES:BEGIN`, `FILE ...`, `FILES:END`) | Already allowed. |
+| Download, chunk by chunk | `CHUNK <src> <name> <offset> <len>` | Already allowed. |
+| After the list or download (`resumeSerial`) | `STREAM ON`, no reply wanted | No. Stays refused. The app ignores the refusal line. |
+| Calibration App, calibration buttons | `CAL GET`, `CAL ...`, `WIFI ...`, `REBOOT` | No. They write settings. Stay refused (REBOOT is the files-mode restart). |
+
+The apps skip any line that does not match what they wait for (`waitLine`), so the `ERR not available...` lines do no harm.
+
+### MTP-A-2 The change
+* New `src/files_mode_cmd.h`: `files_mode_classify(tok, arg)` is the allowlist as a pure function (no I/O, no state). `files_mode_cmd()` in `src/cmd.c` calls it and does the action.
+* `MATLAB PING` (exactly these two words): prints `01010101 10101010 DAQBOARD V1 01010101 10101010`. It does NOT call `stream_enable()`. No task starts. No state changes. In serial mode the same command also starts the stream: that code is unchanged.
+* `STREAM OFF`: prints `STREAM:OFF`. It does not call `stream_enable()` (no stream exists in files mode). `STREAM ON` and `STREAM` with no word: refused.
+* The second word is read with `strtok` only for `MATLAB` and `STREAM`. The other commands read their own arguments, so they are not changed.
+* Not allowed, on purpose: `DAQS`, `WIFI`, `TELEM`, `CAL`, `REC`, `FLUSH`, `PFSFLUSH`, `COMPARE`, `PROFILE`, `STREAM ON`. `DAQS` and `WIFI GET` look read-only, but they read state of tasks that do not run in files mode, and no app step needs them.
+* Commands now allowed in files mode: `PING`, `MATLAB PING`, `STREAM OFF`, `LED`, `LIST`, `FILES`, `SDLS`, `CHUNK`, `CHECK`, `DUMP`, `INFO`, `STATUS`, `REBOOT`, `DL` (`daq_mtp` builds), `LEAVE`, and (in `usb_files.c`) `LOG`.
+
+### MTP-A-3 Test
+* `tools/mtp_hosttest/cmdtest.c` (run by `tools/mtp_hosttest/run.sh`) compiles the real header. 80 checks: each allowed command, `MATLAB` and `STREAM` with a wrong or no second word, and the commands that write (`REC`, `FORMAT`, `CAL`, `WIFI`, ...) stay refused.
+* Builds `daq_mtp`, `daq_mtp_force`, `daq`: no new warnings.
+* NOT tested on the board and NOT tested with the real MATLAB app. UNVERIFIED. Check list for later: open the port with DTR set, send `MATLAB PING` (expect the banner, no number lines after it), `STREAM OFF` (expect `STREAM:OFF`), `FILES`.
+* Note: with no DTR the CDC gives no reply (MTP-HW-10.3). MATLAB `serialport` sets DTR by default, so this is expected to work. UNVERIFIED.
