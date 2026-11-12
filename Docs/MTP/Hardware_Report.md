@@ -219,3 +219,43 @@ Verdict: PASS for files mode on a second board. This board has an EMPTY NAND (no
 * `LIST`: `LIST:0 files`. `FILES`: empty. `CHECK` gives `ERR no file 2`. `SDLS`: `ERR no card`. So this NAND is empty: no file to copy, no CRC test. The 3-copy test was NOT run.
 * `kioclient5 ls "mtp:/IREC DAQ/DAQ"` lists `NAND` and `SD`; `NAND` is empty. `ptp_probe` not run: `kiod6` holds the interface.
 * Not tested: a copy of a real file on this board (needs a recording: user decision), serial position (MTP-HW-9.4), 3-minute run (only about 2 minutes of files-mode run seen, no reset).
+
+## MTP-HW-11 Serial position (MODE2 high): `daq_mtp` on board 28:84:85:46:83:04 (2026-11-12 14:39 to 14:46, user at the PC)
+Verdict: PASS. The safety feature "MODE2 serial = MTP disabled" works. The board stayed on `303a:1001` and no MTP interface appeared. Test only: no build, no flash, no `usbreset`, no `sudo`. Commands sent: `INFO`, `PING`, `LIST`, `FILES`, `STATUS`. Not sent: `REC ON`, `LEAVE`, `DL`, `REBOOT`, `MATLAB PING`. NAND writes: zero. Setup: no SD card, MODE1 manual, no 5 V supply (ADS1115 and NAU7802 absent).
+
+### MTP-HW-11.1 Results
+| # | Check | Result |
+|---|---|---|
+| 1 | `lsusb \| grep 303a`, 1 sample per second, 40 s (14:39:26 to 14:40:07) | Only `303a:1001`, Device 090, in all 40 samples. No `303a:4041`. |
+| 1 | Same check about 6 minutes after the plug-in (14:45:44) | Only `303a:1001`. `grep -c 4041` gives 0. |
+| 1 | `lsusb -v -d 303a:1001`, serial `28:84:85:46:83:04` | 3 interfaces: CDC control (class 2), CDC data (class 10), vendor 255/255/1 (the JTAG interface). No MTP/PTP interface (no class 6). |
+| 2 | Passive read 10 s, `dtr=False rts=False` set before open | The board RESET at the open (ROM boot lines and `entry 0x403c886c` seen at 226 ms). Setting DTR/RTS low does not stop it. See MTP-HW-11.3. |
+| 2 | Boot text | Normal ESP-IDF log. `io: mode1=manual mode2=serial addr=2`, `daq_mtp build: recording is disabled`, `chain on UART1/UART2 at 460800 baud`, ADS1115 and NAU7802 warning (one line each), `pfs: Mount complete (Path A)`, then the SD error. App `f574447-dirty`, compile time Nov 11 09:01:37 (see MTP-HW-11.3). |
+| 3 | `INFO` (up_s=2 after the open reset) | `STATUS:OK rec=0 auto=0 addr=2 mounted=1 path=1 index=1 file=2 ingested=0 dropped=0 pages=0 degraded=0 no_storage=0 nor_failed=0 verify_fail=0 rs_repairs=0 usable_blocks=1018 retired=6 sd=0 sd_bytes=0 sd_drop=0 sd_err=0 up_s=2`, then `CHAIN: tx=3 rx1=0/0 rx2=0/0 ... fwd=0 tx_drop=0`, `LC: running=0 fault=0 samples=0 i2c_err=0 backup=0 restarts=0`, `CAL: ... flash_ok=1`. |
+| 3 | `PING` | `01010101 10101010 DAQBOARD V1 01010101 10101010` |
+| 3 | `LIST` / `FILES` | `LIST:0 files` `LIST:END` / `FILES:BEGIN` `FILES:END` (NAND empty) |
+| 3 | `STATUS` | `STATUS:OK (SD Overflows: 0)` |
+| 4 | `INFO` every 30 s, 200 s total | up_s = 2, 29, 59, 89, 119, 150, 179: grows by 30 each time. No reset. `rec=0 auto=0 mounted=1` in all. `CHAIN tx` grows 1 per second (3, 30, 60, ..., 180 by the log). `LC samples=0 i2c_err=0 restarts=0` in all. |
+| 4 | WDT, panic, reboot text | None. No `Guru`, `abort`, `rst:`, `reset reason`, watchdog line after the boot. USB device 090 never left the bus. |
+| 4 | Log rate | About 250 bytes every 2 s (125 B/s), all from the SD retry (MTP-HW-11.3), plus one 64-byte `daq: in=0 drop=0 pages=0 ...` line every 10 s. 34.8 KB in 201 s including the boot text. Not a flood. |
+| 6 | TinyUSB / MTP lines | None. `grep -i -E 'tinyusb\|mtp'` in the log: no match. No `files mode` line. |
+| 6 | Heap | Not shown in serial mode (the DIAG line is in files mode only). Only the boot `heap_init` lines. |
+
+### MTP-HW-11.2 Why a recording cannot start in this build in serial mode (code read)
+* `src/io.c`: with `DAQ_MTP`, `io_init()` calls `io_rec_disable()` after it reads MODE1. `io_rec_disable()` sets `s_rec_locked = true`, `s_auto = false`, `s_rec = false`, and removes the MODE1 interrupt handler (`gpio_isr_handler_remove`). `io_init()` also removes it at its end when locked. `src/main.c` calls `io_rec_disable()` a second time at line 239.
+* Auto record (MODE1 high): `s_rec = s_auto` is set first, but `io_rec_disable()` clears both right after. The board log shows `daq_mtp build: recording is disabled`. The button interrupt that toggles `s_rec` is removed. The AUTOREC LED follows `s_auto`, so it stays off.
+* Manual record: `rec_set(on)` is `if (!on || !s_rec_locked) s_rec = on;`. It cannot set `s_rec` to true when locked. In addition `src/cmd.c` line 674: `REC ON` while `rec_locked()` prints `REC:ERR recording is disabled in this build (daq_mtp)` and does not call `rec_set`.
+* The recording state `rec_get()` is the only gate for the data path (`src/chain.c` line 162, `src/main.c`). It stays false, so nothing goes into the PFS writer. This matches the board: `ingested=0 pages=0`, `rec=0 auto=0`.
+* Not covered by the lock: `PFSFLUSH`, `FORMAT`-type commands and `CAL` still exist in serial mode (the PFS is read-write). The user rule is: never send them in this build. `CAL` and `PFSFLUSH` were not sent.
+
+### MTP-HW-11.3 Odd points
+1. RESET AT PORT OPEN (also in serial mode, also with `dtr=False rts=False`). Each open of `/dev/ttyACM0` gave a fresh boot (up_s=2 in the first `INFO`). This is the USB Serial/JTAG auto-reset on the DTR/RTS edges that the Linux driver makes at open. Setting the lines in pyserial before `open()` does not help, because the kernel raises them at open. Result: a serial session always restarts the board. With MODE1 high this would start a recording in the plain `daq` build. In `daq_mtp` it cannot (MTP-HW-11.2). The 200 s uptime above is from the last open, not from the plug-in. The board had been on the bus since the replug and showed no disconnect.
+2. App version string `f574447-dirty`, compile time Nov 11 09:01:37. The board has the `daq_mtp` behaviour (the lock line, MODE2 read). The flash in MTP-HW-10 was `358a709` built on Nov 12. The version and time are likely stale because `esp_app_desc` is not rebuilt by an incremental `pio` build. Not proved. Do not use these two fields to identify a build.
+3. SD retry. With no card, the SD mount retries every 2 s and prints 3 error lines each time (`sdmmc_init_ocr ... 0x107`, `sdmmc_card_init failed`, `esp_vfs_fat_sdmmc_sdcard_init failed`). It never stops. It costs about 125 B/s of log and a few ms of SPI/SDMMC use every 2 s. It is a retry loop, not a hang. In `daq`, the same happens (MTP-HW-10.1).
+4. Absent ADS1115 / NAU7802: ONE warning line each at boot (`trying again each second`). The retries are silent. No error flood, no reboot, no hang in 200 s. `LC: running=0 fault=0 samples=0 i2c_err=0 restarts=0` stayed constant. The I2C retry once per second is a low hang risk. Not stressed beyond 200 s.
+5. `INFO` is not the same text as in files mode: no `mode=` field. In serial mode the mode shows only in the boot line (`mode2=serial`) and by `303a:1001` on the bus. A check for `mode=serial` in `INFO` (MTP-HW-9.4 item 4) cannot pass. Use the boot line.
+6. Not tested: 5 V sensors running, `STREAM`, the LED states (nobody looked), WiFi/telemetry (not configured on this board), runs longer than 200 s after the last reset, `LEAVE`.
+
+### MTP-HW-11.4 Verdict on "MODE2 serial = MTP disabled": PASS
+The board in the serial position boots the DAQ, never starts TinyUSB, stays on `303a:1001` for more than 6 minutes, and has no MTP interface. Recording is locked by code and by the board log. Absent sensors and a missing SD card give warnings and silent retries only.
+Next: flip MODE2 to the files position, power cycle, then the crash tests.

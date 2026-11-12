@@ -194,3 +194,8 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 ## MTP-HW-10 (12 Nov, user at the PC): a DIFFERENT board (serial 28:84:85:46:83:04), see Hardware_Report.md MTP-HW-10.
 * Found plain `daq` (fa2d136-dirty, Oct 30), rec=0. Flashed `daq_mtp` (358a709) with a normal pio upload (hash ok). MODE2 low: 1001 about 6 s, then 4041, stable. INFO mode=files blocked_writes=0 nor_blocked=0 lost_pages=0. PING gives `DAQBOARD V1`; `MATLAB PING` is refused in files mode. This NAND is EMPTY (LIST 0 files), so no copy/CRC test. Rule: the TinyUSB CDC needs DTR=1, else no reply. NAND writes: zero.
 * Next: flip MODE2 high, power cycle, run MTP-HW-9.4 (serial position).
+
+## MTP-HW-11 (12 Nov 14:4x, user at the PC): serial position (MODE2 high) on board 28:84:85:46:83:04, PASS. See Hardware_Report.md MTP-HW-11.
+* `daq_mtp` on this board with MODE2 high: only `303a:1001` for 40 s and again after about 6 minutes, no `4041`, no MTP interface (3 interfaces: CDC x2, JTAG vendor). Boot log shows `mode2=serial`, `daq_mtp build: recording is disabled`, no TinyUSB line. `INFO` rec=0 auto=0 mounted=1; `PING` gives `DAQBOARD V1`; `LIST`/`FILES` empty. up_s grew 2, 29, 59, 89, 119, 150, 179: no reset, no WDT. Log about 125 B/s (SD retry every 2 s, 3 error lines each, no card). ADS1115/NAU7802: one warning at boot, silent retries.
+* Odd: every port open resets the board even with `dtr=False rts=False`; `INFO` has no `mode=` field in serial mode (use the boot line); app version string `f574447-dirty` / Nov 11 is stale. Recording lock explained from `io.c`/`cmd.c` in MTP-HW-11.2. NAND writes: zero.
+* Next: flip MODE2 to the files position, power cycle, then the crash tests.
