@@ -259,3 +259,33 @@ Verdict: PASS. The safety feature "MODE2 serial = MTP disabled" works. The board
 ### MTP-HW-11.4 Verdict on "MODE2 serial = MTP disabled": PASS
 The board in the serial position boots the DAQ, never starts TinyUSB, stays on `303a:1001` for more than 6 minutes, and has no MTP interface. Recording is locked by code and by the board log. Absent sensors and a missing SD card give warnings and silent retries only.
 Next: flip MODE2 to the files position, power cycle, then the crash tests.
+
+## MTP-HW-12 One small recording for the files-mode test, board 28:84:85:46:83:04 (2026-11-12 about 14:50, user at the PC)
+Verdict: PASS. The NAND now holds one file. The board is back on `daq_mtp` in the serial position. The user allowed up to 1 Mbit of recording on this board.
+
+### MTP-HW-12.1 Builds
+* Commit `27bc4e5` (includes MTP-A). `pio run -e daq_sim` and `pio run -e daq_mtp`: SUCCESS. `nm`: `T` for the six `tud_mtp_*_cb`. `tools/mtp_hosttest/run.sh`: 8427 checks passed, 0 failed.
+
+### MTP-HW-12.2 Recording log
+| Item | Value |
+|---|---|
+| Date | 2026-11-12, about 14:50 |
+| Board serial | 28:84:85:46:83:04 (no SD card, no 5 V, no real sensors, MODE1 manual) |
+| Test | `daq_sim` (synthetic PT and load cell). One serial session, one port open. Boot wait 13 s. `INFO` and `LIST` before: `rec=0 auto=0 mounted=1`, 0 files. `REC ON`, 7.011 s (timer), `REC OFF`, `PFSFLUSH` (`PFSFLUSH:OK`), `LIST`. |
+| File ID | 2 |
+| Pages (from `LIST`) | 44 (limit was 55) |
+| Bytes (from `LIST`) | 82544 |
+| Mbit written | 44 x 2048 x 8 / 1e6 = 0.721 Mbit (limit 1 Mbit) |
+| Ingested / dropped | NOT recorded. The `STATUS` line of the `INFO` after the recording was removed by an output filter in the test script. The port was not opened again, because each open resets the board and clears the counters. The first `INFO` after the next boot shows `file=3 ingested=0 dropped=0`, which is the new boot, not the recording. |
+* Total NAND writes of this task: 0.721 Mbit. The file stays on the NAND (no delete without a format).
+* After `daq_mtp` boots, `LIST` shows `FILE id=2 pages=44 size=82544`. The next file ID is 3.
+
+### MTP-HW-12.3 Flash steps
+1. `pio run -e daq_sim -t upload --upload-port /dev/ttyACM0`: serial mode, USB Serial/JTAG auto reset worked. 1047392 B, `Hash of data verified`.
+2. Record (MTP-HW-12.2). Opening the port resets the board, so the script opened it once.
+3. `pio run -e daq_mtp -t upload --upload-port /dev/ttyACM0`: 1162880 B at 0x10000, `Hash of data verified` (bootloader and partition table also verified).
+4. 15 s after the flash: boot line `mode1=manual mode2=serial`, `daq_mtp build: recording is disabled`, `pfs: Mount complete (Path A)`. `INFO`: `rec=0 auto=0 mounted=1 file=3 ingested=0 dropped=0 pages=0`. `lsusb`: only `303a:1001`, no `303a:4041`. `REC ON` was not sent.
+
+### MTP-HW-12.4 State of the board now
+* Firmware: `daq_mtp` built at commit `27bc4e5`. MODE2 switch: SERIAL position. NAND: one file (id 2, 44 pages, 82544 bytes). SD: none.
+* Next: the user flips MODE2 to FILES and power cycles. The files-mode copy and CRC test can now run on file 2.

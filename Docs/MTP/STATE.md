@@ -199,3 +199,7 @@ Resume: a session cron fires at 06:23 and starts fresh agents from these files. 
 * `daq_mtp` on this board with MODE2 high: only `303a:1001` for 40 s and again after about 6 minutes, no `4041`, no MTP interface (3 interfaces: CDC x2, JTAG vendor). Boot log shows `mode2=serial`, `daq_mtp build: recording is disabled`, no TinyUSB line. `INFO` rec=0 auto=0 mounted=1; `PING` gives `DAQBOARD V1`; `LIST`/`FILES` empty. up_s grew 2, 29, 59, 89, 119, 150, 179: no reset, no WDT. Log about 125 B/s (SD retry every 2 s, 3 error lines each, no card). ADS1115/NAU7802: one warning at boot, silent retries.
 * Odd: every port open resets the board even with `dtr=False rts=False`; `INFO` has no `mode=` field in serial mode (use the boot line); app version string `f574447-dirty` / Nov 11 is stale. Recording lock explained from `io.c`/`cmd.c` in MTP-HW-11.2. NAND writes: zero.
 * Next: flip MODE2 to the files position, power cycle, then the crash tests.
+
+## MTP-HW-12 (12 Nov 14:5x, user at the PC): one small recording on board 28:84:85:46:83:04. See Hardware_Report.md MTP-HW-12.
+* Built `daq_sim` and `daq_mtp` at 27bc4e5 (nm T x6, host test 8427/8427). Flashed `daq_sim`, recorded 7 s: NAND file id 2, 44 pages, 82544 bytes = 0.721 Mbit (limit 1 Mbit). `ingested`/`dropped` not captured (filter error in the test script). Then flashed `daq_mtp` (hash ok): serial position, only `303a:1001`, `rec=0 auto=0`, `LIST` shows file 2.
+* Next: the user flips MODE2 to FILES and power cycles; run the copy and CRC test on file 2.
