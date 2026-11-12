@@ -200,9 +200,9 @@ This build in serial mode is the full DAQ firmware: sensors, chain, `pfs_writer`
 Verdict: PASS for files mode on a second board. This board has an EMPTY NAND (no file). NAND writes: zero. No `REC ON`, no `LEAVE`, no `daq` flash, no `usbreset`, no `sudo`. The serial-position check (MTP-HW-9.4) is NOT done yet.
 
 ### MTP-HW-10.1 Board identification
-* Serial/JTAG serial number (`lsusb -v`): `28:84:85:46:83:04` (MAC 28:84:85:46:83:04). In files mode, TinyUSB string `288485468304`. The spike board in Spike_Report.md MTP-HW had `2884854684E0`: this is a different board.
+* Serial/JTAG serial number (`lsusb -v`): `28:84:85:46:83:04` (MAC 28:84:85:46:83:04). In files mode, TinyUSB string `288485468304`. The spike board in Spike_Report.md had `2884854684E0`: this is a different board.
 * Chip rev v0.2. NAND: `usable_blocks=1018 retired=6` (the first board: 1019).
-* Firmware found (before the flash): plain `daq` build, version `fa2d136-dirty`, compile time Oct 30 2026 20:56. It ran in serial style (`303a:1001` for 20+ s) with MODE2 low, because plain `daq` ignores MODE2. Boot line: `io: mode1=manual mode2=files addr=2`. `STATUS:OK rec=0 auto=0 mounted=1 file=2 usable_blocks=1018 sd=0`. No ADS1115 (0x48), no NAUâ7802 (0x2A) answer. SD init failed every 2 s (no card). No recording was running, so `REC OFF` was not sent.
+* Firmware found (before the flash): plain `daq` build, version `fa2d136-dirty`, compile time Oct 30 2026 20:56. It ran in serial style (`303a:1001` for 20+ s) with MODE2 low, because plain `daq` ignores MODE2. Boot line: `io: mode1=manual mode2=files addr=2`. `STATUS:OK rec=0 auto=0 mounted=1 file=2 usable_blocks=1018 sd=0`. No ADS1115 (0x48), no NAU7802 (0x2A) answer. SD init failed every 2 s (no card). No recording was running, so `REC OFF` was not sent.
 * WARNING for the serial port: on this plain `daq` firmware, opening `/dev/ttyACM0` resets the board (USB Serial/JTAG DTR/RTS). Every open gave a fresh boot (`up_s=1`). With MODE1 high this would start a recording. MODE1 was manual here.
 
 ### MTP-HW-10.2 Build and flash
