@@ -52,4 +52,7 @@ cc_unit "$here/stubs.c" "$BASE"
 cc_unit "$here/fake_stores.c" "$BASE"
 cc_unit "$here/main.c" "$BASE"
 $CC $SAN -o "$out/mtp_hosttest" $objs -lpthread
+# MTP-A: the files-mode command allowlist (src/files_mode_cmd.h), a stand-alone test
+$CC -std=gnu11 -O1 -g $SAN $WARN -I"$root/src" -o "$out/cmdtest" "$here/cmdtest.c"
+"$out/cmdtest"
 ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0} "$out/mtp_hosttest" "$@"

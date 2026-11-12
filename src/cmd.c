@@ -19,6 +19,7 @@
 #include "chain.h"
 #include "console_io.h"
 #include "files_mode.h"
+#include "files_mode_cmd.h"
 #include "io.h"
 #include "led_sr.h"
 #include "mtp_store.h"
@@ -579,15 +580,20 @@ static void do_compare(int remote)
    command is done. false = the normal dispatch runs it (PING, LED, LIST, FILES, SDLS, CHUNK, CHECK, DUMP). */
 static bool files_mode_cmd(const char *tok)
 {
-    static const char *const ok[] = { "PING", "LED", "LIST", "FILES", "SDLS", "CHUNK", "CHECK", "DUMP" };
-    for (unsigned i = 0; i < sizeof ok / sizeof ok[0]; i++) { if (!strcmp(tok, ok[i])) { return false; } }
-    if (!strcmp(tok, "INFO") || !strcmp(tok, "STATUS")) {
+    /* REVIEW (MTP-A): the decision is files_mode_classify() (files_mode_cmd.h, host test tools/mtp_hosttest/cmdtest.c). */
+    fmc_t c = files_mode_classify(tok, files_mode_cmd_wants_arg(tok) ? strtok(NULL, " \t") : NULL);
+    if (c == FMC_NORMAL) { return false; }
+    if (c == FMC_STATUS) {
         pfs_status_t st;
         pfs_get_status(s_pfs, &st);
         cio_printf("STATUS:OK mode=files rec=0 mounted=%d index=%d blocked_writes=%lu nor_blocked=%lu lost_pages=%lu\n",
                        st.mounted, st.index_ready, (unsigned long)mtp_pfs_blocked_writes(),
                        (unsigned long)mtp_pfs_blocked_nor_writes(), (unsigned long)mtp_store_pfs_lost_pages());
-    } else if (!strcmp(tok, "REBOOT")) {          /* restarts in files mode again (no flush: nothing is open) */
+    } else if (c == FMC_MATLAB_PING) {            /* REVIEW (MTP-A): the MATLAB apps connect with this. The banner only: no stream_enable(), no task. */
+        cio_printf("01010101 10101010 DAQBOARD V1 01010101 10101010\n");
+    } else if (c == FMC_STREAM_OFF) {             /* REVIEW (MTP-A): the apps wait for this reply before a file list or a download. No stream runs. */
+        cio_printf("STREAM:OFF\n");
+    } else if (c == FMC_REBOOT) {                 /* restarts in files mode again (no flush: nothing is open) */
         cio_printf("REBOOT:OK\n");
         cio_flush();
 #ifdef DAQ_MTP
@@ -597,12 +603,12 @@ static bool files_mode_cmd(const char *tok)
         esp_restart();
 #endif
 #ifdef DAQ_MTP
-    } else if (!strcmp(tok, "DL")) {              /* ROM download mode: esptool works with no BOOT button (Spike_Report.md MTP-P-9.2) */
+    } else if (c == FMC_DL) {                     /* ROM download mode: esptool works with no BOOT button (Spike_Report.md MTP-P-9.2) */
         cio_printf("DL:OK rebooting to ROM download mode\n");
         cio_flush();
         files_mode_restart(FM_DOWNLOAD);
 #endif
-    } else if (!strcmp(tok, "LEAVE")) {           /* restarts in serial mode once, with MODE2 still low */
+    } else if (c == FMC_LEAVE) {                  /* restarts in serial mode once, with MODE2 still low */
         cio_printf("LEAVE:OK\n");
         cio_flush();
         vTaskDelay(pdMS_TO_TICKS(200));
