@@ -10,6 +10,7 @@
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/message_buffer.h"
+#include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "sdmmc_cmd.h"
@@ -32,6 +33,9 @@ static uint8_t s_sb_store[SB_SIZE + 1];
 static MessageBufferHandle_t s_rem;
 static StaticMessageBuffer_t s_rem_struct;
 static uint8_t s_rem_store[REM_SIZE + 1];
+/* A message buffer allows only one writer. Both chain RX tasks write s_rem, so they take this lock first. */
+static SemaphoreHandle_t s_rem_lock;
+static StaticSemaphore_t s_rem_lock_struct;
 static volatile bool s_mounted;
 static volatile uint32_t s_dropped, s_errors;
 static volatile uint64_t s_bytes;
@@ -60,7 +64,10 @@ void sd_log_push_remote(uint8_t dev, const uint8_t *records, size_t len)
     if (!s_rem || len > sizeof m - 1) { return; }
     m[0] = dev;
     memcpy(m + 1, records, len);
-    if (xMessageBufferSend(s_rem, m, len + 1, 0) != len + 1) { s_dropped++; }
+    xSemaphoreTake(s_rem_lock, portMAX_DELAY);
+    size_t sent = xMessageBufferSend(s_rem, m, len + 1, 0);
+    xSemaphoreGive(s_rem_lock);
+    if (sent != len + 1) { s_dropped++; }
 }
 
 static bool mount_card(void)
@@ -183,6 +190,7 @@ static void sd_task(void *arg)
 void sd_log_start(pfs_ctx_t *pfs)
 {
     s_pfs = pfs;
+    s_rem_lock = xSemaphoreCreateMutexStatic(&s_rem_lock_struct);   /* before s_rem: a writer that sees s_rem also sees the lock */
     s_rem = xMessageBufferCreateStatic(REM_SIZE, s_rem_store, &s_rem_struct);
     s_sb = xStreamBufferCreateStatic(SB_SIZE, 1, s_sb_store, &s_sb_struct);
     xTaskCreatePinnedToCore(sd_task, "sd", 6144, NULL, 2, NULL, 0);
