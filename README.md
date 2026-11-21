@@ -95,6 +95,52 @@ In such a file, bit 15 of the seq changes once in 32768 records. In a file with 
 A reader takes a file as PT only when the bit changes rarely. `CHECK` tests the first 128 records of the file (at most one
 change). The MATLAB app counts the changes in the whole file (fewer than one in 16384 records).
 
+### Temperature records (NTC)
+Two META records, one after the other, make one reading (the PFS file, the SD file, and the chain use the same 8-byte record):
+
+| Kind | Payload (u32, little endian) |
+| :-- | :-- |
+| 12 (NTC time) | u32: time of the reading, the same clock as the sensor records |
+| 13 (NTC raw) | bits 14..0 = AIN2 count, bit 15 = AIN2 type (0 = 10 kohm, 1 = 100 kohm), bits 30..16 = AIN3 count, bit 31 = AIN3 type. A half of `0xFFFF` = this thermistor is not installed. |
+
+A real count is at most 32767 (4.096 V), so `0xFFFF` is never a reading. A reader uses kind 13 only right after kind 12. The chain sends the pair as
+packet type 5. All boards of a chain need this firmware: an older board counts a type 5 packet as a bad packet and does not repeat it.
+
+## Temperature (NTC)
+Two thermistors on the ADS1115 pins AIN2 and AIN3. The circuit of each is 5VA, the thermistor, a node on the pin, a 560 ohm resistor to ground,
+and a filter capacitor on the node. The voltage on the node goes up with the temperature. Each channel has a type: 10 kohm (about room
+temperature) or 100 kohm (hot parts). The type is a setting and goes into the record (bit 15 of each half), so a file says which thermistor was
+meant. A 100 kohm thermistor gives a small voltage near room temperature (about 9 counts per degree C at 25 C), and a larger one when hot (about
+90 counts per degree C at 100 C).
+
+**A DAQ is in one of two modes.** The mode is saved in the flash of the DAQ and starts after a reboot. The thermistors and the PT never share the
+ADS1115 at the same time, so the thermistors cannot disturb a PT reading.
+
+| Mode | ADS1115 | Records |
+| :-- | :-- | :-- |
+| `PT` (default) | AIN0 at +/-6.144 V, 860 SPS. The thermistors are never read. This is the original driver. | PT records |
+| `ONLY` | AIN2 and AIN3 at +/-4.096 V (125 uV per count). No PT samples. | Temperature records (16 bytes, 50 per second: one PFS page of 1876 bytes in 2.3 s) |
+
+The load cell, the chain, the WiFi mode, the SD logger, and the calibration blocks work the same in both modes. The PT calibration of the MATLAB app has
+no live data on a DAQ in mode `ONLY`.
+
+**Commands (USB):** `NTC` (the settings and the last reading), `NTC TYPE 2|3 10K|100K` (saved, applies at once), `NTC MODE PT|ONLY` (saved,
+applies after `REBOOT`; do not send it while recording). The settings are in the flash of the DAQ (key `ntc`), like the calibration.
+
+**Mode `ONLY`, one cycle (every 20 ms).** The driver waits for a fresh ready edge, writes the MUX for AIN2, throws away 2 conversions, keeps 4
+(the average), then does the same for AIN3. About 14 conversions, 16 ms. Of the 2 thrown away, the first belongs to the old channel (TI data sheet and
+forum answers: a new Config value waits for the conversion that runs), and the second is for the input to settle. Throwing away both is also right if
+a write restarted the conversion. A cycle stops when an edge is missed, an I2C call fails, or an edge comes during the Config write (the order of
+the results is then not known): nothing is logged for it and the next cycle starts again from a fresh edge. `NTC` shows `scans` and `failed`.
+
+**Installed or not.** A thermistor is logged only if its count is at least a limit that depends on its type: 656 counts for 10 kohm (82 mV, the
+voltage at 0 C with B 3950) and 66 counts for 100 kohm (8.3 mV, 0 C). A missing thermistor reads about 0 V. If neither is installed, nothing is
+written, and the next cycle comes after 1 s. A thermistor colder than 0 C looks like a missing one.
+
+**Not done:** the readings do not go to the live stream, the WiFi link, or the MATLAB windows. The firmware sends counts only. The conversion to
+degrees is on the host (`tools/bin_to_csv.py` writes `<file>_NTC.csv` with the type, the count, the volts, and the temperature; it assumes B 3950 for
+both types, 5 V, and 560 ohm; change with `--ntc-beta10`, `--ntc-beta100`, `--ntc-vs`, `--ntc-rfixed`).
+
 ## SD card
 No header, no footer: only records. Name: `F<PFS file ID, 5 digits>D<device ID>.BIN`.
 One file holds both sensors: the PT records and the load cell records, in the order that the board saved them.
@@ -123,7 +169,7 @@ The baud table is in `src/board.h`. `CHAIN_BAUD` is now 460800. At this rate, th
 Same replies as the Arduino sketch: `MATLAB PING` (banner, then live readings), `STATUS` (`STATUS:OK (SD Overflows: n)`),
 `FLUSH` (`SD_FLUSHED:OK`). New: `PING` (banner only), `INFO` (details), `PFSFLUSH` (close the PFS file), `STREAM OFF`,
 `REC ON|OFF`, `LIST`, `SDLS`,
-`CHECK [file [n]]`, `DUMP file offset len`, `LED 0..255`, `STREAM ON`, `CAL GET`, `CAL PT <A> <B>`, `CAL LC <A> <B>`.
+`CHECK [file [n]]`, `DUMP file offset len`, `LED 0..255`, `STREAM ON`, `NTC` (temperature, see "Temperature (NTC)"), `CAL GET`, `CAL PT <A> <B>`, `CAL LC <A> <B>`.
 The WiFi commands (`WIFI`, `TELEM`, `REBOOT`) are in the section "Live telemetry over WiFi".
 A line without a line end runs after 500 ms (as the sketch: MATLAB sends `MATLAB PING` without `\n`).
 
@@ -169,6 +215,13 @@ lc_b=...` gives the number of valid blocks and the last one. `CHECK` leaves META
 Each sensor has two values, A and B. PT: pressure (PSI) = A x V + B, with V in volts. Load cell: force (N) = A x (mV/V) + B. The
 MATLAB app finds them (see "MATLAB app"). The DAQ keeps them and writes them into the recorded data, so each file says which
 calibration the data had.
+
+Units: force is in N everywhere (the base unit: the calibration app, *Files & Plot*, `DAQ_Live_Monitor`, `DAQ_Validation_Viewer`,
+`tools/bin_to_csv.py`, the motor performance results in N and N s). The displays show lbf as the second unit, in brackets, for example
+`5320.7 N (1196.1 lbf)`. The `DAQ_Live_Monitor` list *Thrust unit* puts lbf first in the plot and the readout; the other unit is then in
+brackets. The firmware does not use A and B (it only keeps and records them), so the recorded raw counts have no unit problem.
+`DAQ_Live_Monitor` saves its load cell values (`lcScaleN`, `lcFsN`, `lcTareN`) in N, in new MATLAB preference names. An older version of
+the monitor saved lbf values under `lcScale`, `lcFs` and `lcTare`: they are not used (an old `lcTare` is converted once).
 
 - **Save and read:** `CAL PT <A> <B>` or `CAL LC <A> <B>` saves the values of one sensor. `CAL GET` reads both. All three give one
   line: `CAL:OK rev=<n> pt_set=<0|1> pt_a=<f> pt_b=<f> lc_set=<0|1> lc_a=<f> lc_b=<f>`, or `CAL:ERR <reason>`. Send A and B with 9
@@ -222,121 +275,108 @@ Live view:
 - The units of the PT are Voltage (V), Pressure (PSI, Ax+B), and Raw counts.
 - The units of the load cell are Output (mV/V), Force (N, Ax+B), and Raw counts.
 - If the file has no records of the selected sensor, the app selects the sensor that has records.
-- The app finds the calibration blocks in the file (the last valid block counts) and shows it in a label under the plot. The units
-  *Pressure (PSI, Ax+B)* and *Force (N, Ax+B)* use A and B of the file if it has them for that sensor. If not, they use the values
-  in the app. The y-axis label says `[file cal]` or `[app cal]`.
+- The Start and End sliders cover the time of both sensors. When you change the sensor (PT / Load Cell), the selected range stays. It goes
+  back to the whole file only when you load a different file. The unit list also keeps its kind (voltage/output, pressure/force, raw).
+- The y-axis is fitted to the plotted data at every update (Start/End range, sensor, unit, parameter or file change), with 5 % space above and
+  below. The app sets it itself, so a zoom or a pan with the toolbar of the plot cannot leave old limits behind.
+- The app finds the calibration blocks in the file (the last valid block counts) and shows it in a label under the plot.
 
-## Live telemetry over WiFi
-For the static fire, nobody can be near the rocket. A DAQ near the rocket sends decimated data over WiFi (a phone hotspot) to a
-server on the internet. In the safety bunker, the MATLAB app `DAQ_Live_Monitor` gets the data from the server directly over TCP (the PC
-must have internet). As an alternative, a DAQ in the bunker gets the data and prints it on USB for the app. The server is in `server/`
-(C++, Docker, see `server/README.md`). The frame format is in `server/telem_proto.h`. The DAQ code is in `src/telem.c`.
+*Sensor parameters of the file* (the panel above the plot). Often the DAQ had no calibration when it recorded, or the wrong one, so the values
+in the file are wrong. The panel has the fields A and B for the PT (PSI per V, PSI) and for the load cell (N per mV/V, N). Each sensor
+uses the first of these that exists, and the label next to the fields says which one:
+- `[edited]`: the values you typed. They are for the loaded file only (a new file clears them). When you change a value, the plot,
+  the statistics and the *Motor performance* window update at once. The raw samples are never changed.
+- `[file cal, rev N]`: the last valid calibration block in the file.
+- `[app cal: not in the file]`: the values of the calibration view of the app (the same as before this panel existed).
+The y-axis label also says `[edited]`, `[file cal]` or `[app cal]`. Buttons:
+- *File values*: forget the typed values.
+- *Monitor scales*: type the scales of `DAQ_Live_Monitor` on this PC (PT 494.586 psi/V, load cell 5320.7 N per mV/V, B = 0).
+- *Write to .BIN file...*: puts the values into the calibration blocks of the file. A warning asks you to confirm first. It rewrites all
+  the blocks of the file in place (the revision goes up by 1), or adds one block after the last whole record when the file has none.
+  The raw samples do not change. The first time, the original is copied to `<file>.orig`. The calibration saved on the DAQ does not change.
+  Every program that reads the file then uses the new values. Only the sensors that you edited, or that the file already had, get a
+  calibration: the other one stays without. The app reads the file again and checks the written values.
 
-### Modes
-All DAQs run the same firmware. The WiFi mode is saved in the flash and is read once at boot. A new mode starts after a reboot.
+*Export CSV* and *Export range CSV* (under the list of local files) export the loaded `.BIN` file with the sensor parameters of the panel, so the
+calibrated values are the same as in the plot. *Export CSV* takes the whole file. *Export range CSV* takes only the samples between the Start and
+End sliders, and puts `_trim_<start>_to_<end>_s` in the file names (`time_s` is still the time of the whole file). Both ask for a format first:
+- *Individual*: one CSV for each sensor that has samples, `<name>_PT.csv` and `<name>_LC.csv`. Columns: `time_s`, `pressure_psi` (PT) or `force_N`
+  (load cell), `raw_count`, then the parameters that made the value: `cal_A_psi_per_V` and `cal_B_psi` (PT) or `cal_A_N_per_mV_per_V` and
+  `cal_B_N` (load cell), `cal_source` (`file`, `edited` or `app`) and `cal_revision` (only when the source is the file).
+- *Combined 1 kHz*: `<name>_combined_1kHz.csv`, columns `time_s`, `pressure_psi`, `thrust_N`. No raw counts and no parameters. Both sensors
+  go to a 1 kHz grid (whole milliseconds) with *makima* (modified Akima cubic; MATLAB before R2019b uses *pchip*). The grid covers the time
+  that both sensors have. A data gap (more than 10 sample intervals, 50 ms at least) and the time outside the data of a sensor are empty
+  (`NaN`): nothing is invented there. RK4 is not a method for this: it integrates differential equations, and sampled data has no equation.
+  Test with `tools/resample_mirror.py methods` (load cell 321 SPS, 0.3 ms timing jitter):
 
-| Mode | Use | What it does |
-| :-- | :-- | :-- |
-| `OFF` (default) | Every DAQ that only records | No WiFi code runs. No radio, no task, no buffer. The sink does one test of a variable for each sample. |
-| `UPLOAD` | DAQ with the WiFi link (it can have no sensors) | Keeps every Nth sample of each sensor, of its own sensors and of every other DAQ in the chain, and sends them to the server in batches. |
-| `DOWNLOAD` | DAQ in the bunker | Gets the data from the server and prints it on the USB live stream. It does **not** print its own sensors. |
+  | method | 87 Hz tone kept | 130 Hz tone kept | ignition step 0 to 2000 N: highest / lowest | error on a realistic motor |
+  |---|---|---|---|---|
+  | linear | 77 % | 55 % | 2000.0 / 0.0 N | 5.30 N |
+  | pchip | 87 % | 64 % | 2000.0 / 0.0 N | 4.62 N |
+  | makima | 91 % | 64 % | 2000.0 / 0.0 N | 4.16 N |
+  | cubic spline | 97 % | 80 % | 2013.5 / -9.4 N | 3.13 N |
 
-If the mode is `UPLOAD` or `DOWNLOAD` but the SSID or the server is not set, the DAQ stays in `OFF` (`run=OFF` in the reply of `WIFI GET`).
+  Makima keeps more of a fast oscillation than linear or pchip and does not overshoot at the ignition and the burnout. A spline keeps the
+  most, but it invents a peak and a negative thrust at the step (about 0.5 %). **Every** interpolation loses amplitude near the Nyquist
+  frequency (160 Hz for the load cell), and it adds no information (the load cell has 321 samples/s and the PT 883 samples/s). So use this
+  file for plots and for peak thrust, impulse and burn time, not to measure a resonance: for that use the *Frequency* tool of the motor
+  window (it works on the raw samples) or the *Individual* files.
+- *Debug*: `<name>_debug.csv`, the old format. One row for each sample of both sensors, sorted by time: `sensor`, `time_s`, `seq`,
+  `raw_count`, `volts_or_mV_per_V`, `calibrated_PSI_or_N`, `cal_A`, `cal_B`, `cal_source`, `cal_revision`.
+A message after the export lists the files and the parameters that it used.
 
-### Commands
-Each command saves to the flash. The reply is one line, `WIFI:OK ...` or `WIFI:ERR <reason>`. The password is never sent back.
-- `WIFI GET`: the saved mode (`mode=`), the mode of this boot (`run=`), the settings, the link state, RSSI, dropped samples.
-- `WIFI MODE OFF|UPLOAD|DOWNLOAD`, `WIFI SSID <name>`, `WIFI PASS <password>` (the SSID and the password are the rest of the line, so
-  they can hold spaces; no text = an open network).
-- `TELEM SERVER <host> <port> <token>` (the token has 16 characters at most), `TELEM DECIM <pt> <lc>` (keep every Nth sample, 1 to 1000;
-  the defaults 15 and 5 give 59 Hz and 64 Hz), `TELEM STATUS` (same reply as `WIFI GET`).
-- `REBOOT`: saves the open files and restarts. It refuses while recording is on. (The profile builds keep their own `REBOOT [WRAP]`.)
-
-The MATLAB app `DAQ_Calibration_App` has a *WiFi / Telemetry...* window that sends these commands (button next to *Files & Plot...*).
-
-### UPLOAD mode (`telem_push`, `upload_task`)
-- The sink calls `telem_push()` for each sample of the own sensors. The chain receive tasks call `telem_push_remote()` for each PT and load cell
-  packet of the other DAQs (and `telem_push_remote_cal()` for their calibration blocks). Each device ID and each sensor has its own decimation
-  counter, so it keeps every Nth sample of each. A record goes into a ring of 16384 records (144 KB) in the PSRAM, with the device ID of the
-  board that made it. The ring and the counters are under one short spinlock because there are three writers (the sink on core 1, two chain
-  tasks on core 0). It never waits. When the ring is full, the oldest record goes and `drops` goes up.
-- A DAQ does not need sensors to be the upload DAQ: it sends what the chain gives it. A DAQ in the chain sends its samples on the chain
-  also when it does not record, and the UPLOAD DAQ passes them to the server.
-- The task `telem` runs on **core 0**, priority 2, as the WiFi task. The ADS1115 ISR and the PFS writer are on core 1 and are not touched.
-  The task starts after the PFS mount, so the mount time does not change.
-- Every 500 ms, it sends one frame for each DAQ and sensor (`DATA_PT`, `DATA_LC`). The `src_dev` of a frame is the device ID of the DAQ that
-  made the data (not the ID of the upload DAQ). It sends the calibration block (`CAL`) of each DAQ at the start and each time a new one comes
-  (the DAQs repeat it every 30 s). The upload DAQ sends its own `CAL` only when its own sensors give samples. It sends `STATUS` (RSSI, drops,
-  queue, uptime, reconnects) every 2 s, with its own ID.
-- The link breaks on any error, or after a send time-out of 3 s. The task then reconnects (wait 1 s, then up to 10 s). After a reconnect it throws
-  away the ring, so the viewer gets the present. The old data stays in the NAND and SD files. The telemetry never saves or re-sends data.
-- Power-save of the WiFi modem is off (it adds delay and lost frames). This raises the current, so test with the real power supply (brown-out level 3 is on).
-- The hotspot must be 2.4 GHz (iPhone: "Maximize Compatibility").
-- Hello flag `CHAIN_HELLO_WIFI` (0x20) and the LED `LED_WIFI` show that the link to the server works.
-
-### DOWNLOAD mode (`download_task`)
-- The task sends `GET(cursor, 4096 bytes, wait 5 s)` and the server answers with a `BATCH` (long poll). The cursor makes the fetch resume
-  after a break. After an outage longer than 10 s, it starts at "now" and skips the missed data (the server archive has it).
-- The records go to the stream buffer with `stream_push_wait()`, which waits for room. `stream.c` prints them as the live lines it always printed
-  (`%.3f` for PT, `L:<count>` for the load cell), so an old reader still works. After each batch it adds these text lines:
-  - `CALRX:OK rev=.. pt_set=.. pt_a=.. pt_b=.. lc_set=.. lc_a=.. lc_b=..` when a calibration block with a good CRC is complete,
-  - `T:DTPT <us>` and `T:DTLC <us>`: the time between two samples of that sensor in the batch (0 = not known),
-  - `T:LINK <drops> <rssi_upload> <rssi_own>`,
-  - `T:AGE <ms>`: the age of the newest data on the server, -1 = none yet. **This line ends the batch.**
-- The stream starts after `MATLAB PING`, as always.
-
-### MATLAB: `DAQ_Live_Monitor`
-Select the source, then push *Connect*:
-- **Server (TCP)** (default): the PC is a `DOWNLOAD` client of the server. It does the same steps as the `DOWNLOAD` DAQ: `HELLO` with the
-  token, then `GET(cursor, 15000 bytes, wait 2 s)` in a loop. Type the host, the port and the token. The app keeps the host and the port in
-  the MATLAB preferences of the PC. The token field starts with the team token (`defTok` in the code), or with the environment variable
-  `DAQ_TELEM_TOKEN` when it is set. A wrong token stops the connection. After any other break, the app connects again (1 s, then up to 10 s) and
-  continues at its cursor, so no data is lost while the server keeps it. Each sample keeps the time of its DAQ (its microsecond clock),
-  so the plot shows the real time between the samples. The info line shows the `STATUS` of the upload DAQ (RSSI, drops, queue, uptime,
-  reconnects).
-- **DAQ on USB**: connect it to the DAQ in `DOWNLOAD` mode (the scan for the port is automatic). The samples of a batch get their time from
-  the end of the batch and the sample interval (`T:DTPT`, `T:DTLC`). This source has no history.
-
-**History.** The server keeps the frames of many hours in memory. The *History* list selects the old data that *Connect* loads before the
-live view starts: none, the last 2, 10 or 30 minutes of data, or all that the server has. The app measures the frame rate on the last
-300 frames and starts that many minutes before the newest frame. The banner shows the progress. While the server has more data, the app
-asks again at once (10 minutes of data is about 0.7 MB: a few seconds over the internet). To see the static fire after it happened, select the history and push
-*Connect* again.
-
-**Save & clear server.** This button makes the server close its archive files (they stay on the server), start new files, and empty its
-history (frame `RESET`, see `server/README.md`). Use it after a very long idle time, so that no login on the Linux server is necessary. The app
-asks first. Then it clears its own plots too and starts a new CSV file. A server of an older version refuses `RESET` (redeploy it from git).
-
-**Units.** Pressure (psi) = PT scale × volts − PT tare (default scale 494.586 psi/V). Force (lbf) = LC scale × mV/V − LC tare (default
-scale 1196.14 lbf per mV/V). The thrust shows in lbf or N. *Tare PT* and *Tare LC* set the tare of each DAQ to the mean of its last 2 s.
-The scales and the tares stay in the MATLAB preferences. The calibration that is saved in the DAQ is not used by this app.
-
-**Plots.** Each DAQ that sends data gets its own line, with the same colour in both plots and a legend entry ("DAQ 5"). Each board has its
-own clock, so each DAQ has its own time map; two DAQs line up to about 0.5 s. A gap in the data is a gap in the line. The screen draws
-4 times per second at most, and only when the data changed. A line has 1500 points at most: in a long window, each bucket of samples
-gives its minimum and its maximum, so the peaks stay visible (the same method as *Files & Plot*). The labels change only when their text
-changes. The y-axis spans 5 % of the full scale at least (*FS psi*, default 2000; *FS lbf*, default 2500), so the noise of a quiet sensor
-stays small.
-
-**Overview and view.** A thin overview under the plots shows all the data in memory: one colour row for pressure (P) and one for thrust (T).
-The colour is |value| / full scale (light grey = quiet, orange, red = full scale), so the activity is easy to find. A black box shows the part
-in the plots. The *View* slider moves that part: at the right end the view is `LIVE` and follows the newest data. A click on the overview
-also moves the view. The *Width* slider sets the width of the view (5 s to 4 h, log scale).
+*Motor performance...* (under the list of local files) opens the same analysis as the motor performance window of
+`DAQ_Live_Monitor` (see "Live telemetry over WiFi"), on all the records of the loaded file (full rate, both sensors of that DAQ):
+- It uses the Start/End range. When the two sliders are at their ends, it uses the whole file. Move the sliders to exclude a
+  different peak (for example a press test before the static fire).
+- Thrust (N) = LC A x mV/V + B. Pressure (psi) = PT A x V + B, with A and B from the sensor parameters panel (the same values as the plot
+  and the CSV export; the window has no scale fields of its own). The report starts with the A and B that it used and where they came from.
+  The baseline before the burn is removed, so B has no effect, but A does. A warning appears when a sensor has no calibration in the file
+  and none was typed (A = 1, B = 0).
+- The report also gives the sample rate and the lost samples (seq gaps) in the burn. A data gap in the burn is a gap of more than
+  10 sample intervals (50 ms at least).
+- When you plot a different file, or edit a parameter, the window analyzes again. *Save results* writes
+  `motor_performance_<file>_<time>.txt`, `_curve.csv`, two PNG plots and a PDF (see "Motor performance" below).
+- Each file has the records of one DAQ. If the PT and the load cell were on different DAQs, analyze the two files one after the other.
+- The button *Frequency* (in the motor window of the `.BIN` file; the live telemetry window does not have it, because its data is decimated to
+  about 60 samples/s) shows a slider and two spectra: the thrust (left) and the pressure (right) in a window of **0.5 s centred at the slider**.
+  The slider is the time from the burn start (the same axis as the two plots, from 2 s before the burn to 2 s after it). A grey band on the
+  plots shows the window. The slider starts in the middle of the burn and stays where you put it when you analyze again.
+  - The frequency axis goes from 0 to the Nyquist frequency of each sensor (half its sample rate: about 160 Hz for the load cell, about
+    441 Hz for the PT). The amplitude is in N or psi (single sided, log scale).
+  - The spectrum is a DFT taken directly at the real sample times. Nothing is interpolated, because every interpolation loses amplitude near
+    Nyquist. The mean and the slope of the window are removed (the thrust curve is not a resonance), and a Hann window is used.
+  - The window is 0.5 s, so the resolution is about 2 Hz: two tones closer than that are one peak. The line under the plots lists the three
+    biggest peaks above 6 Hz (at least 5 % of the biggest, 6 Hz apart).
+  - A vibration above the Nyquist frequency folds back to a lower frequency, so it looks like a real one at that lower frequency.
+  - A window with a data gap, or at the end of the data, gives a message instead of a spectrum.
+  - Test: `tools/spectrum_mirror.py synth` (87 Hz 20 N and 130 Hz 8 N come back as 19.7 N and 8.3 N; going through the 1 kHz interpolation
+    first gives 17.1 N and 5.6 N). On the press test file, a window at the loading (560 s) shows a tone at 13.8 Hz with harmonics at 27.8 and
+    41.5 Hz (the cause is not known: maybe the pump of the press), and the quiet windows show only noise of 0.1 to 0.5 N.
 
 **Motor performance.** The button opens a window that finds the strongest peak of thrust and of pressure in all the data in memory:
 - The noise comes from the differences of neighbour samples. A peak must be 15 times the noise and 5 N (or 5 psi) at least.
 - The baseline is the median of the 2 s that end 0.2 s before the burn. It is removed first, so a load cell without a tare is not a problem.
 - Burn: from where the thrust passes 5 % of the peak going up, to where it goes below 5 % after the peak (interpolated crossing times).
-- Peak thrust: the mean of the highest 5 % of the burn samples. Total impulse: trapezoids over the burn, in N s. Average thrust:
+- Peak thrust: the mean of the highest 5 % of the burn samples. Total impulse: trapezoids over the burn, in N s (lbf s in brackets). Average thrust:
   impulse / burn time. It also gives the motor class, the same values for the pressure, and warnings (the peaks do not line up, the data
   starts or ends inside the burn, a data gap in the burn).
-- *Save results* writes `motor_performance_<time>.txt`, `_curve.csv` and two PNG plots.
-- The telemetry is decimated (about 60 samples/s). Use the SD or NAND file for the final numbers.
+- The report also has the *motor name* (the class letter and the average thrust in N, for example `K1500`) and the *initial thrust*: the mean
+  of the first 0.5 s of the burn.
+- *Save results* writes `motor_performance_<time>.txt`, `_curve.csv`, two PNG plots and a PDF. The PDF is the page of the old
+  `StaticFirePerf.m` script: thrust (left axis, N) and pressure (right axis, psi) against the time from the burn start, and under the plot
+  the file, motor name, total impulse, max thrust, average thrust, initial thrust, burn time, max pressure and average pressure (lbf in brackets).
+- This replaces `StaticFirePerf.m`. The numbers can differ a little from that script, because it took every sample above 5 % of the max
+  (also a spike before or after the burn) and did not remove the baseline. This analysis takes one burn from crossing to crossing.
+  The old script also had a sign error: the initial thrust used `tTime >= (tTime(1) + .5)`, the mean of everything AFTER the first 0.5 s
+  (nearly the average thrust). It must be `<=`, the first 0.5 s. This analysis uses the first 0.5 s.
+- The telemetry is decimated (about 60 samples/s). Use the SD or NAND file for the final numbers: `DAQ_Calibration_App`,
+  *Files & Plot*, *Motor performance...*.
 
 The banner is green (`LIVE`, data age), blue (history load), red (`STALE` when the data age is above the limit, `NO LINK` when no batch
 comes for 5 s (TCP) or 8 s (USB), or a wrong token), or orange (the USB DAQ is not in `DOWNLOAD` mode). The app writes
 `telemetry_live_<time>.csv`: unix time, `daq` (the device ID, or `USB`), sensor, time, `board_time_us` (empty for USB), the value in V or
-mV/V, and the value in psi or lbf with the tare of that moment. The old data from the history goes in the same file.
+mV/V, and the value in psi or N with the tare of that moment. The old data from the history goes in the same file.
 
 ### Not tested yet
 - The firmware builds (all code compiles with `-Wall -Werror` and links), but it has not run on a board. Not yet measured: free heap and boot time
@@ -496,7 +536,8 @@ At 4.5 V on AVDD and gain 128:
 - Full scale is +/-17.58 mV, or +/-3.906 mV/V.
 - One count is 2.095 nV.
 - mV/V = counts x 1000 / 2^31.
-- The force is A x (mV/V) + B. The MATLAB app finds A and B from a calibration with known weights.
+- The force (N) is A x (mV/V) + B. The MATLAB app finds A and B from a calibration with known weights.
+- The press test `test_data/LC_Cal_1` gives A = 5320.7 N per mV/V = 1196.14 lbf per mV/V (the press: 2201.3 lbf = 9791.9 N at +1.8402 mV/V).
 
 ### Start sequence
 1. The driver resets the registers (RR). It powers the digital part (PUD) and waits for PUR (up to 10 ms).
@@ -586,12 +627,22 @@ The PT baseline is the PT of the firmware before the load cell (board 5).
 - `daq_sim`: `READBACK` gave `errors=0 lc_errors=0` (2016 PT and 672 load cell records).
 
 ### Not tested yet
+- The NTC scan and the settings (builds `daq` and `daq_sim` compile; no board ran it). The claim that the conversion in progress ends with the old MUX is from
+  the TI data sheet and forum answers, not from a bench test. Check in mode `ONLY`: `NTC` (`failed` must stay 0, and the readings must come at 50 per second).
+  The Python decoder was tested with a made-up file. The `daq_sim` build writes a reading every 5 s (AIN3 present in turns), and has not run.
 - The chain test with two real boards. Only the loopback test ran.
 - The failure cases at the bench: breakout unplugged at boot, analog 5 V late, and analog 5 V off and on during a run.
   Only the software simulation `daq_nolc` ran for the first case.
 - The calibration of the cell with known weights (the real mV/V of the cell). The soak ran with the cell not loaded.
 - The MATLAB windows (live view and *Files & Plot*, both sensors, and an old file), the buttons *Save to DAQ* and *Read from DAQ*,
   and the calibration display of a file. The code is written. It has not run in MATLAB.
+- The sensor parameters panel of *Files & Plot*, the CSV export formats (*Individual*, *Combined 1 kHz*, *Debug*), the *Frequency* tool, the motor performance PDF, and *Write to .BIN file...* The code is written
+  and has not run in MATLAB. The byte logic of *Write to .BIN file...* was tested with a Python copy (`tools/cal_patch_mirror.py`) on copies
+  of real files (22 blocks rewritten, a file with no block, a damaged block, a file with a partial record at the end). The MATLAB
+  structure was checked only by a script (balanced blocks, no shared variable names by accident).
+  The 1 kHz resampling and the *Frequency* spectrum were checked with Python copies (`tools/resample_mirror.py`, `tools/spectrum_mirror.py`: no
+  overshoot, a 0.2 s gap stays empty, 649160 rows for a 650 s file, known tones found). The MATLAB calls (`interp1(..., 'makima')`, the slider,
+  the log-scale spectrum axes) have not run.
 - The calibration block after `PFSFLUSH` (the block of a new PFS file), and the block every 30 s inside a recording. The 30 s timer
   was tested with the recording off (counter `cal_tx`). The recordings of the write test were shorter than 30 s after the last block.
 - A board in the chain that saves the calibration blocks of another board. Only the packet counters and the loopback were tested.

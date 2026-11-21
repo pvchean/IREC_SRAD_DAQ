@@ -38,6 +38,23 @@ def decode_cal(metas):
     return blocks, last
 
 
+def decode_ntc(metas):
+    """metas: list of (index, kind, payload). Return [(time_us, ain2, ain3)]; each is (count, type) or None (not installed).
+    type 0 = 10 kohm, 1 = 100 kohm (bit 15 of each half). A kind 13 counts only right after a kind 12 (record.h)."""
+    def half(h):
+        return None if h == 0xFFFF else (h & 0x7FFF, h >> 15)
+    out, prev = [], None
+    for idx, kind, pay in metas:
+        if kind == 12:
+            prev = (idx, pay)
+        elif kind == 13 and prev and idx == prev[0] + 1:
+            out.append((prev[1], half(pay & 0xFFFF), half(pay >> 16)))
+            prev = None
+        else:
+            prev = None
+    return out
+
+
 def load(path):
     """Return (size, n, flips, pt_only, {"PT": [(t, reading, seq, raw)], "LC": [...], "META": [(index, kind, payload)]})."""
     d = open(path, "rb").read()

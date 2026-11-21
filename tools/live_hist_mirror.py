@@ -76,6 +76,10 @@ def burn_stats(t, y, min_amp):
     r["top5"] = srt[:max(1, math.ceil(0.05 * len(srt)))].mean()
     r["integral"] = np.trapezoid(yy, tt)
     r["avg"] = r["integral"] / r["burnS"]
+    tb = t[i0:i1 + 1]; yb = yn[i0:i1 + 1]
+    k_i = tb <= r["tStart"] + 0.5                   # initial thrust: the FIRST 0.5 s of the burn (t <= start + 0.5 s)
+    if not k_i.any(): k_i[0] = True
+    r["initial"] = yb[k_i].mean()
     r["tPeak"] = t[ip]; r["gapMax"] = np.diff(tt).max(); r["found"] = True
     return r
 
@@ -112,6 +116,13 @@ def test_burn():
     assert r["found"] and abs(r["tStart"] - 12.005) < 0.02 and abs(r["base"] - offset) < 1.5
     assert abs(r["integral"] - I_true) / I_true < 0.01
     assert 1950 < r["top5"] < 2010 and abs(r["avg"] - r["integral"] / r["burnS"]) < 1e-9
+    # initial thrust = mean of the first 0.5 s of the burn; the old StaticFirePerf.m had ">=" (everything AFTER the first 0.5 s)
+    w = np.linspace(r["tStart"], r["tStart"] + 0.5, 200_001)
+    init_true = np.trapezoid(curve(w), w) / 0.5
+    late = y[(t >= r["tStart"] + 0.5) & (t <= r["tEnd"])] - r["base"]
+    print("initial %.1f N (true %.1f N);  the old '>=' formula would give %.1f N (about the average thrust %.1f N)"
+          % (r["initial"], init_true, late.mean(), r["avg"]))
+    assert abs(r["initial"] - init_true) < 15 and abs(late.mean() - r["initial"]) > 100
     assert motor_class(640) == ("I", 100.0) and motor_class(641)[0] == "J" and motor_class(5.0)[0] == "B"
     # noise only: no burn
     r2 = burn_stats(t, offset + rng.normal(0, 3, t.size), 5)

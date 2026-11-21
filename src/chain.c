@@ -72,7 +72,7 @@ uint8_t chain_seen(uint32_t max_age_ms, uint8_t flags[8])
 
 static size_t rec_size(uint8_t type)
 {
-    return (type == CHAIN_TYPE_ADS || type == CHAIN_TYPE_LOADCELL || type == CHAIN_TYPE_CAL) ? sizeof(record_t)
+    return (type == CHAIN_TYPE_ADS || type == CHAIN_TYPE_LOADCELL || type == CHAIN_TYPE_CAL || type == CHAIN_TYPE_NTC) ? sizeof(record_t)
          : type == CHAIN_TYPE_HELLO ? 1U : 0U;
 }
 
@@ -117,7 +117,7 @@ static void hello_task(void *arg)
         uint8_t f = (uint8_t)((rec_get() ? CHAIN_HELLO_REC : 0U) | (io_auto_mode() ? CHAIN_HELLO_AUTO : 0U) |
                               (ads1115_running() ? CHAIN_HELLO_SENSOR : 0U) | (sd_log_mounted() ? CHAIN_HELLO_SD : 0U) |
                               (nau7802_running() ? CHAIN_HELLO_LOADCELL : 0U) |
-                              (telem_link_up() ? CHAIN_HELLO_WIFI : 0U));
+                              (telem_link_up() ? CHAIN_HELLO_WIFI : 0U) | (ads1115_only_running() ? CHAIN_HELLO_NTCONLY : 0U));
         send_pkt(CHAIN_TYPE_HELLO, 1, &f, 1);
         vTaskDelay(pdMS_TO_TICKS(HELLO_MS));
     }
@@ -143,6 +143,11 @@ void chain_push_cal(const record_t *r, unsigned n)
     }
 }
 
+void chain_push_ntc(const record_t *r, unsigned n)
+{
+    if (n > 0U && n <= OWN_RECS) { send_pkt(CHAIN_TYPE_NTC, (uint8_t)n, (const uint8_t *)r, n * sizeof *r); }
+}
+
 static void shift(rx_t *s, size_t k)
 {
     s->n -= k;
@@ -161,7 +166,7 @@ static void handle(int port, const uint8_t *pkt, size_t len)
     s_st.forwarded++;
     if (type == CHAIN_TYPE_ADS || type == CHAIN_TYPE_LOADCELL) { telem_push_remote(dev, pkt + HDR, cnt); }   /* WiFi UPLOAD mode only */
     else if (type == CHAIN_TYPE_CAL) { telem_push_remote_cal(dev, pkt + HDR, cnt); }
-    if ((type == CHAIN_TYPE_ADS || type == CHAIN_TYPE_LOADCELL || type == CHAIN_TYPE_CAL) && rec_get()) {   /* recording = saving */
+    if ((type == CHAIN_TYPE_ADS || type == CHAIN_TYPE_LOADCELL || type == CHAIN_TYPE_CAL || type == CHAIN_TYPE_NTC) && rec_get()) {   /* recording = saving */
         sd_log_push_remote(dev, pkt + HDR, (size_t)cnt * rec_size(type));
     }
 }

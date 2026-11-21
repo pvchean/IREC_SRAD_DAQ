@@ -4,7 +4,8 @@ function DAQ_Validation_Viewer
 %   DAQ_Validation_Viewer
 %
 %   Two files are chosen in dialogs. Nothing is read from a fixed path.
-%     1. Press CSV: Time (s), Force (lbf), Displacement (in). Header rows are skipped.
+%     1. Press CSV: Time (s), Force, Displacement. The unit row says the force unit: (lbf) or (N); no unit row = lbf.
+%        The force is converted to N when the file is read. Header rows are skipped.
 %     2. DAQ file, either:
 %        - a NAND .BIN file (downloaded from the board; decoded here, load cell records only), or
 %        - the live_data_loadcell_<time>.csv file of the calibration app (Time, mV/V).
@@ -13,12 +14,14 @@ function DAQ_Validation_Viewer
 %     The points are averaged over the full-rate data, so the decimation does not change them.
 %     The green line (zero point) and the magenta line (max point) move with their sliders.
 %     Each point is the average of the signal over the "Average" width around it.
-%     The signal is scaled to lbf by the straight line through
-%       zero point -> 0 lbf    and    max point -> the max load you type.
-%   Bottom plot: DAQ force (lbf) and press force (lbf) inside the window.
+%     The signal is scaled to N by the straight line through
+%       zero point -> 0 N    and    max point -> the max load you type (N).
+%   Bottom plot: DAQ force (N) and press force (N) inside the window. The text shows lbf beside the N values.
 %     Press time + press start + fine offset = DAQ time. The press start slider spans the whole DAQ file
 %     (set it to where the press test begins, e.g. 300 s after 5 minutes of idling). The fine offset is +-60 s.
 %     The two window sliders select the part of the DAQ data that is compared.
+
+LBF_TO_N = 4.4482216152605;   % N per lbf
 
 % ---- choose and read the files
 [pf, pp] = uigetfile({'*.csv', 'Press CSV (*.csv)'}, 'Select the PRESS csv (Time, Force, Displacement)');
@@ -51,7 +54,7 @@ yhi = yhi + pad;
 
 % ---- state: every slider and field writes here through set_val
 P = struct('zero', t0 + 0.05 * span, 'maxp', t0 + 0.95 * span, 'avgw', 1.0, ...
-           'lmax', 2200, 'rate', 50, 'ws', t0, 'we', t1, 'start', t0, 'off', 0);
+           'lmax', 9786, 'rate', 50, 'ws', t0, 'we', t1, 'start', t0, 'off', 0);
 H = struct();
 cacheRate = NaN;   % plot rate of the decimated DAQ data dt_t, dt_x
 dt_t = [];
@@ -83,7 +86,7 @@ g3.Padding = [0 0 0 0];
 uilabel(g3, 'Text', 'Average around points (s)');
 uieditfield(g3, 'numeric', 'Value', P.avgw, 'Limits', [0.01 span], ...
     'ValueChangedFcn', @(s, ~) set_val('avgw', s.Value));
-uilabel(g3, 'Text', 'Max load (lbf)');
+uilabel(g3, 'Text', 'Max load (N)');
 uieditfield(g3, 'numeric', 'Value', P.lmax, 'Limits', [0 Inf], ...
     'ValueChangedFcn', @(s, ~) set_val('lmax', s.Value));
 uilabel(g3, 'Text', 'Plot rate (Hz)');
@@ -132,11 +135,11 @@ title(ax, 'DAQ signal (green = zero point, magenta = max point, yellow = window)
 % ---- bottom plot: DAQ force against press force
 ax = H.ax2;
 hold(ax, 'on'); grid(ax, 'on');
-H.dq = line(ax, NaN, NaN, 'Color', [0.2 0.4 0.8], 'LineWidth', 1.5, 'DisplayName', 'DAQ (lbf)');
-H.pr = line(ax, press.t, press.F, 'Color', [0.85 0.2 0.2], 'LineWidth', 1.5, 'DisplayName', 'Press (lbf)');
+H.dq = line(ax, NaN, NaN, 'Color', [0.2 0.4 0.8], 'LineWidth', 1.5, 'DisplayName', 'DAQ (N)');
+H.pr = line(ax, press.t, press.F, 'Color', [0.85 0.2 0.2], 'LineWidth', 1.5, 'DisplayName', 'Press (N)');
 legend(ax, 'show', 'Location', 'northwest');
 xlabel(ax, 'DAQ time (s)');
-ylabel(ax, 'Force (lbf)');
+ylabel(ax, 'Force (N)');
 title(ax, 'DAQ force vs press force');
 
 refresh();
@@ -203,8 +206,8 @@ refresh();
         sS.Value = P.start;
         sO.Value = P.off;
         refresh();
-        H.info.Value = [H.info.Value; {sprintf('Auto-align: press start %.2f s, fine offset %+.2f s, RMS %.2f lbf', ...
-            P.start, P.off, align_cost(P.start + P.off, tw, Fd))}];
+        H.info.Value = [H.info.Value; {sprintf('Auto-align: press start %.2f s, fine offset %+.2f s, RMS %.2f N (%.2f lbf)', ...
+            P.start, P.off, align_cost(P.start + P.off, tw, Fd), align_cost(P.start + P.off, tw, Fd) / LBF_TO_N)}];
     end
 
     function c = align_cost(s, tw, Fd)
@@ -257,7 +260,7 @@ refresh();
         H.dline.XData = dt_t;
         H.dline.YData = dt_x;
 
-        k = P.lmax / (xm - xz);                 % lbf per mV/V
+        k = P.lmax / (xm - xz);                 % N per mV/V
         m = dt_t >= ws & dt_t <= we;
         tw = dt_t(m);
         Fd = (dt_x(m) - xz) * k;
@@ -279,8 +282,8 @@ refresh();
         end
 
         txt = {sprintf('Zero: %.4f mV/V (avg at %.2f s)', xz, P.zero), ...
-               sprintf('Max : %.4f mV/V (avg at %.2f s) = %.1f lbf', xm, P.maxp, P.lmax), ...
-               sprintf('Scale: %.2f lbf per mV/V', k), ...
+               sprintf('Max : %.4f mV/V (avg at %.2f s) = %.1f N (%.1f lbf)', xm, P.maxp, P.lmax, P.lmax / LBF_TO_N), ...
+               sprintf('Scale: %.2f N per mV/V (%.2f lbf per mV/V)', k, k / LBF_TO_N), ...
                sprintf('Window: %.2f to %.2f s', ws, we)};
 
         ok = isfinite(Fp);
@@ -289,30 +292,37 @@ refresh();
             tok = tw(ok);
             [mx, im] = max(abs(d));
             txt = [txt, {sprintf('Overlap: %d samples, %.2f s', nnz(ok), tok(end) - tok(1)), ...
-                         sprintf('Bias (DAQ - press): %+.2f lbf', mean(d)), ...
-                         sprintf('RMS difference: %.2f lbf', sqrt(mean(d .^ 2))), ...
-                         sprintf('Max |difference|: %.2f lbf at %.2f s', mx, tok(im))}];
+                         sprintf('Bias (DAQ - press): %+.2f N (%+.2f lbf)', mean(d), mean(d) / LBF_TO_N), ...
+                         sprintf('RMS difference: %.2f N (%.2f lbf)', sqrt(mean(d .^ 2)), sqrt(mean(d .^ 2)) / LBF_TO_N), ...
+                         sprintf('Max |difference|: %.2f N (%.2f lbf) at %.2f s', mx, mx / LBF_TO_N, tok(im))}];
         else
             txt = [txt, {'No press data overlaps this window (check the offset).'}];
         end
 
         if ~isempty(Fd)
             [pd, ipd] = max(Fd);
-            txt = [txt, {sprintf('Peak DAQ  : %.1f lbf at %.2f s', pd, tw(ipd))}];
+            txt = [txt, {sprintf('Peak DAQ  : %.1f N (%.1f lbf) at %.2f s', pd, pd / LBF_TO_N, tw(ipd))}];
         end
         if ~isempty(Fpw)
             tpk = pt(kp);
             [pk, ipk] = max(Fpw);
-            txt = [txt, {sprintf('Peak press: %.1f lbf at %.2f s', pk, tpk(ipk))}];
+            txt = [txt, {sprintf('Peak press: %.1f N (%.1f lbf) at %.2f s', pk, pk / LBF_TO_N, tpk(ipk))}];
         end
         H.info.Value = txt(:);
     end
 end
 
 function p = read_press(file)
-% Time (s), Force (lbf) rows. The header and unit rows have no numbers and are skipped.
+% Time (s), Force rows. The header and unit rows have no numbers and are skipped. The unit row says (lbf) or (N):
+% the force is returned in N (a file with no unit row is lbf, as the press of the LC_Cal_1 test writes).
 txt = strrep(fileread(file), '"', '');
 lines = splitlines(txt);
+unitRow = lower(strjoin(lines(1:min(5, numel(lines))), ' '));
+if contains(unitRow, '(n)') && ~contains(unitRow, '(lbf)')
+    toN = 1;
+else
+    toN = 4.4482216152605;      % lbf -> N
+end
 rows = nan(numel(lines), 2);
 for k = 1:numel(lines)
     v = str2double(split(lines{k}, ','));
@@ -325,7 +335,7 @@ if ~any(ok)
     error('No Time,Force rows found in %s.', file);
 end
 p.t = rows(ok, 1);
-p.F = rows(ok, 2);
+p.F = rows(ok, 2) * toN;
 [p.t, si] = sort(p.t);
 p.F = p.F(si);
 [p.t, iu] = unique(p.t, 'stable');   % interp1 needs unique sample times

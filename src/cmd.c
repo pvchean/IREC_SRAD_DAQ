@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "ads1115.h"
 #include "cal.h"
 #include "chain.h"
 #include "console_io.h"
@@ -55,6 +56,8 @@ static bool sd_up(void)
     return sd_log_mounted();
 }
 
+static void ntc_cfg_line(void);
+
 static void do_info(void)
 {
     pfs_status_t st;
@@ -77,12 +80,66 @@ static void do_info(void)
     nau7802_get_stats(&ns);
     cio_printf("LC: running=%d fault=%d samples=%" PRIu32 " i2c_err=%" PRIu32 " backup=%" PRIu32 " restarts=%" PRIu32 " ocal=%06" PRIX32 "\n",
            nau7802_running(), nau7802_fault(), ns.samples, ns.i2c_errors, ns.backup_reads, ns.restarts, ns.ocal);
+    ntc_cfg_line();                                /* mode=ONLY: this DAQ makes no PT samples */
     cal_reply("CAL:");
     cio_printf("CAL: flash_ok=%d\n", cal_flash_ok());
     uint8_t fl[8], m = chain_seen(SEEN_MS, fl);
-    for (int i = 0; i < 8; i++) {                  /* heartbeat flags: 1 rec, 2 auto, 4 sensor, 8 SD, 16 load cell */
+    for (int i = 0; i < 8; i++) {                  /* heartbeat flags: 1 rec, 2 auto, 4 sensor, 8 SD, 16 load cell, 32 WiFi, 64 thermistor-only (no PT) */
         if (m & (1U << i)) { cio_printf("DAQ %d flags=0x%02X\n", i, fl[i]); }
     }
+}
+
+/* ---- NTC: the temperature readings on ADS1115 AIN2 and AIN3 (ads1115.h) ----
+     NTC | NTC GET            last reading and the settings
+     NTC MODE PT|ONLY         PT = normal (default, thermistors never read). ONLY = no PT, 50 thermistor readings/s. Saved; applies after REBOOT.
+     NTC TYPE 2|3 10K|100K    thermistor type of AIN2 or AIN3. Saved; applies at once.
+   Replies (one line each):
+     "NTC:OK age_ms=<n> a2=<raw>/<10K|100K>/<mv> a3=<...> scans=<n> failed=<n>" ("-" = not installed), or
+     "NTC:NONE scans=<n> failed=<n>" (no reading so far: PT mode, or no thermistor installed)
+     "NTC:CFG mode=<PT|ONLY> saved=<PT|ONLY> type2=<10K|100K> type3=<10K|100K>"   (mode = running, saved = after REBOOT)
+     "NTC:ERR <reason>". The conversion to degrees is on the host. */
+static void ntc_cfg_line(void)
+{
+    ntc_cfg_t c;
+    bool run;
+    ads1115_ntc_cfg(&c, &run);
+    cio_printf("NTC:CFG mode=%s saved=%s type2=%s type3=%s\n", run ? "ONLY" : "PT", c.only ? "ONLY" : "PT",
+               c.type[0] ? "100K" : "10K", c.type[1] ? "100K" : "10K");
+}
+
+static void do_ntc(const char *sub, const char *a, const char *b)
+{
+    if (sub && !strcmp(sub, "MODE")) {
+        bool only = a && !strcmp(a, "ONLY");
+        if (!a || (!only && strcmp(a, "PT"))) { cio_printf("NTC:ERR use NTC MODE PT or NTC MODE ONLY\n"); return; }
+        if (!ads1115_ntc_set_only(only)) { cio_printf("NTC:ERR flash write failed, the mode is lost at a reset\n"); return; }
+        ntc_cfg_line();
+        return;
+    }
+    if (sub && !strcmp(sub, "TYPE")) {
+        int ch = a && (!strcmp(a, "2") || !strcmp(a, "3")) ? atoi(a) - 2 : -1;
+        bool k100 = b && !strcmp(b, "100K");
+        if (ch < 0 || !b || (!k100 && strcmp(b, "10K"))) { cio_printf("NTC:ERR use NTC TYPE 2|3 10K|100K\n"); return; }
+        if (!ads1115_ntc_set_type(ch, k100 ? 1 : 0)) { cio_printf("NTC:ERR flash write failed, the type is lost at a reset\n"); return; }
+        ntc_cfg_line();
+        return;
+    }
+    if (sub && strcmp(sub, "GET")) { cio_printf("NTC:ERR use NTC, NTC MODE PT|ONLY, or NTC TYPE 2|3 10K|100K\n"); return; }
+    ntc_cfg_line();
+    ntc_stats_t s;
+    ads1115_ntc_stats(&s);
+    if (!s.have) {
+        cio_printf("NTC:NONE scans=%" PRIu32 " failed=%" PRIu32 "\n", s.scans, s.failed);
+        return;
+    }
+    char v[2][40];
+    for (int c = 0; c < 2; c++) {
+        uint16_t r = s.last.raw[c];
+        if (r == REC_NTC_ABSENT) { strcpy(v[c], "-"); }
+        else { snprintf(v[c], sizeof v[c], "%u/%s/%.2f", (unsigned)(r & 0x7FFFU), (r & 0x8000U) ? "100K" : "10K", (double)(r & 0x7FFFU) * 0.125); }
+    }
+    cio_printf("NTC:OK age_ms=%" PRIu32 " a2=%s a3=%s scans=%" PRIu32 " failed=%" PRIu32 "\n",
+               s.age_ms, v[0], v[1], s.scans, s.failed);
 }
 
 /* List the files on the SD card with their sizes. */
@@ -672,6 +729,10 @@ static void run(char *line)
     }
     else if (!strcmp(tok, "STATUS")) { cio_printf("STATUS:OK (SD Overflows: %lu)\n", (unsigned long)sd_log_dropped()); }   /* as the sketch */
     else if (!strcmp(tok, "INFO")) { do_info(); }
+    else if (!strcmp(tok, "NTC")) {
+        char *a = strtok(NULL, " \t"), *b = a ? strtok(NULL, " \t") : NULL, *d = b ? strtok(NULL, " \t") : NULL;
+        do_ntc(a, b, d);
+    }
     else if (!strcmp(tok, "LIST")) { do_list(); }
     else if (!strcmp(tok, "SDLS")) { do_sdls(); }
     else if (!strcmp(tok, "COMPARE")) { char *a = strtok(NULL, " \t"); do_compare(a ? atoi(a) : -1); }

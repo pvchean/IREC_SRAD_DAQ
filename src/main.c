@@ -73,7 +73,8 @@ static void emit_cal(bool rec)
     s_cal_last_us = esp_timer_get_time();
 }
 
-static void sink(const record_t *r)
+/* The start of every sink call: takes the lock, writes the calibration block when it is due. Returns the recording state. */
+static bool sink_begin(void)
 {
     xSemaphoreTake(s_sink_lock, portMAX_DELAY);
     bool rec = rec_get();
@@ -81,6 +82,12 @@ static void sink(const record_t *r)
         emit_cal(rec);
     }
     s_was_rec = rec;
+    return rec;
+}
+
+static void sink(const record_t *r)
+{
+    bool rec = sink_begin();
     if (!telem_hide_local()) { stream_push(r); }               /* live readings, only after MATLAB PING; not on the DOWNLOAD DAQ */
     telem_push(r);                                             /* WiFi UPLOAD mode only: every Nth sample to the ring, never waits */
     if (rec_is_lc(r)) { chain_push_lc(r); }                    /* to the other boards, also when not recording */
@@ -97,6 +104,24 @@ static void on_sample(const ads_sample_t *s)
     record_t r = { rec_ts(s->timestamp_us), s->reading, s_seq };
     s_seq = (uint16_t)((s_seq + 1U) & REC_PT_SEQ_MASK);
     sink(&r);
+}
+
+/* A temperature reading (record.h): two META records, one after the other under the sink lock. The ADS driver calls this
+   only in thermistor mode, and only when a thermistor is installed. They go to the PFS file and the SD file while recording, and to the chain always.
+   Not to the live stream or the WiFi link. */
+static void on_ntc(const ntc_sample_t *n)
+{
+    const record_t b[2] = { rec_make_meta(REC_META_NTC_TIME, rec_ts(n->timestamp_us)),
+                            rec_make_meta(REC_META_NTC_RAW, (uint32_t)n->raw[0] | ((uint32_t)n->raw[1] << 16)) };
+    bool rec = sink_begin();
+    if (rec) {
+        for (unsigned i = 0; i < 2U; i++) {
+            (void)pfs_ingest(s_pfs, (const uint8_t *)&b[i], sizeof b[i]);
+            sd_log_push(&b[i]);
+        }
+    }
+    chain_push_ntc(b, 2);
+    xSemaphoreGive(s_sink_lock);
 }
 
 #if defined(DAQ_SIM) || !defined(DAQ_TOGGLE)      /* the toggle test does not start the load cell */
@@ -122,6 +147,10 @@ static void sim_task(void *a)
         if (i % 3U == 0U) {
             nau_sample_t l = { (uint32_t)esp_timer_get_time(), (int32_t)(n++ & 0x3FFFFFU) - 0x200000 };
             on_load_cell(&l);
+        }
+        if (i % 5000U == 2500U) {                              /* a temperature reading every 5 s: AIN2 10k about 25 C, AIN3 100k in turns present and not */
+            ntc_sample_t nt = { (uint32_t)esp_timer_get_time(), { 2121U, (i / 5000U) % 2U ? (0x8000U | 4000U) : REC_NTC_ABSENT } };
+            on_ntc(&nt);
         }
         vTaskDelayUntil(&t, 1);
     }
@@ -321,7 +350,7 @@ void app_main(void)
 #ifdef DAQ_SIM
     xTaskCreatePinnedToCore((TaskFunction_t)sim_task, "sim", 4096, NULL, 6, NULL, 1);
 #else
-    if (ads1115_start(on_sample) != 0) { ESP_LOGE(TAG, "sensor not started"); }
+    if (ads1115_start(on_sample, on_ntc) != 0) { ESP_LOGE(TAG, "sensor not started"); }
 #ifndef DAQ_TOGGLE                         /* the toggle test drives the DRDY pin */
     if (nau7802_start(on_load_cell) != 0) { ESP_LOGE(TAG, "load cell not started"); }
 #endif

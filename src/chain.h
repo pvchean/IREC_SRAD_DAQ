@@ -9,6 +9,7 @@
    Sensor type 1 = ADS1115, type 2 = load cell (NAU7802). Both use record_t (8 bytes). A packet holds one type.
    Type 4 = calibration block (6 META records of record_t, see cal.h), sent when the values change, at the start of a
    recording, and every CAL_PERIOD_S seconds.
+   Type 5 = temperature reading, 2 META records (NTC_TIME, NTC_RAW: record.h), sent only when a thermistor is installed.
    Type 3 = heartbeat, one 1-byte record (CHAIN_HELLO_* flags), sent each second, so the other boards see
    this board also without sensor data.
    A packet holds 1 to 32 records; this board sends 16. */
@@ -24,12 +25,14 @@
 #define CHAIN_TYPE_LOADCELL 2
 #define CHAIN_TYPE_HELLO    3
 #define CHAIN_TYPE_CAL      4         /* calibration block: 6 META records (cal.h), 8 bytes each */
+#define CHAIN_TYPE_NTC      5         /* temperature: 2 META records (record.h) */
 
 #define CHAIN_HELLO_REC     0x01U     /* recording (saving) is on */
 #define CHAIN_HELLO_AUTO    0x02U     /* Mode 1 switch: auto record */
 #define CHAIN_HELLO_SENSOR  0x04U     /* the ADS1115 answers */
 #define CHAIN_HELLO_SD      0x08U     /* an SD card is mounted */
 #define CHAIN_HELLO_LOADCELL 0x10U    /* the NAU7802 gives samples */
+#define CHAIN_HELLO_NTCONLY 0x40U     /* thermistor mode: this board makes no PT samples (ads1115.h) */
 #define CHAIN_HELLO_WIFI    0x20U     /* the telemetry link to the server works (telem.h) */
 
 typedef struct {
@@ -48,6 +51,8 @@ void chain_push_ads(const record_t *r);
 void chain_push_lc(const record_t *r);
 /* A calibration block: n records in one packet, sent at once. */
 void chain_push_cal(const record_t *r, unsigned n);
+/* A temperature reading: n META records in one packet, sent at once. */
+void chain_push_ntc(const record_t *r, unsigned n);
 void chain_get_stats(chain_stats_t *out);
 /* Bit i set = a valid packet of device ID i came in the last max_age_ms (the own ID is never set).
    flags (8 bytes, can be NULL) gets the last heartbeat flags of each ID. */

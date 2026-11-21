@@ -26,9 +26,11 @@ function DAQ_Live_Monitor()
 %
 %   UNITS
 %   Pressure (psi) = PT scale (psi/V) * volts - PT tare.     Default scale 494.586 psi/V.
-%   Force (lbf)    = LC scale (lbf per mV/V) * mV/V - LC tare. Default scale 1196.14 lbf per mV/V. Thrust shows in lbf or N.
+%   Force (N)      = LC scale (N per mV/V) * mV/V - LC tare.   Default scale 5320.7 N per mV/V (= 1196.14 lbf per mV/V, the
+%                    press test). Thrust is in N; lbf shows beside it. The "Thrust unit" list puts lbf first in the plot and readout.
 %   "Tare PT" and "Tare LC" set the tare of each DAQ to the mean of its last 2 s of data. The scales and the tares stay
-%   in the MATLAB preferences of this PC. The calibration that is saved in the DAQ is not used here.
+%   in the MATLAB preferences of this PC (the names lcScaleN, lcFsN, lcTareN: they hold N values). Older versions saved lbf values
+%   under lcScale, lcFs and lcTare: they are not used (an old lcTare is converted once). The calibration that is saved in the DAQ is not used here.
 %
 %   PLOTS
 %   Several DAQs: each DAQ gets its own colour and a legend entry ("DAQ 5"). Each board has its own clock, so each DAQ
@@ -43,8 +45,10 @@ function DAQ_Live_Monitor()
 %   MOTOR PERFORMANCE
 %   The button opens a window that finds the strongest peak of thrust and of pressure in all the data in memory and
 %   gives: burn time (5 % of peak to 5 % of peak), peak thrust (mean of the top 5 % of the burn samples), average thrust
-%   (impulse / burn time), total impulse (N s) and the motor class. The baseline before the burn is removed first.
+%   (impulse / burn time), total impulse (N s, the unit of the motor classes) and the motor class. Each value shows lbf and lbf s
+%   beside it. The baseline before the burn is removed first.
 %   The telemetry data is decimated (about 60 samples/s). Use the SD or NAND file for the final numbers.
+%   For the file: DAQ_Calibration_App, Files & Plot, button "Motor performance..." (the same analysis).
 %
 %   "Data age" is the age of the newest data on the server when the server answered. The banner turns red when the data
 %   age is above the limit, or when no batch comes at all. The CSV log (Log to CSV) has each sample with its time.
@@ -52,9 +56,9 @@ function DAQ_Live_Monitor()
     % --- constants ---
     lcMvVPerCount = 1000 / 2^31;      % load cell: counts / (gain 128 * 2^24) as mV/V (the same as DAQ_Calibration_App)
     voltPerLsb = 0.0001875;           % PT: ADS1115, +/-6.144 V range (src/stream.c VOLT_PER_LSB)
-    lbfToN = 4.4482216152605;
+    lbfToN = 4.4482216152605;        % N per lbf
     ptScaleDef = 494.586;             % psi per volt
-    lcScaleDef = 1196.14;             % lbf per mV/V
+    lcScaleDef = 1196.14 * lbfToN;    % N per mV/V (the press test gave 1196.14 lbf per mV/V)
     maxPts = 1500;                    % the most points of one plot line
     drawPeriod = 0.25;                % s between two redraws (at most)
     tareS = 2;                        % a tare is the mean of the last 2 s
@@ -68,7 +72,7 @@ function DAQ_Live_Monitor()
     histSecs = [0, 120, 600, 1800, Inf];
     defTok = 'OIahPM4HCuo1WGu9';      % the token of the team server (DAQ_TELEM_TOKEN replaces it when it is set)
     ptFsDef = 2000;                   % full scale of the PT (psi): the y-axis span is 5 % of it at least
-    lcFsDef = 2500;                   % full scale of the load cell (lbf)
+    lcFsDef = 11000;                  % full scale of the load cell (N), about 2500 lbf
     minSpanFrac = 0.05;
     widthMinS = 5; widthMaxS = 4 * 3600;   % the limits of the Width slider
 
@@ -107,7 +111,8 @@ function DAQ_Live_Monitor()
     tick = 0;
     logFile = -1;
     ptTare = tareVec('ptTare');
-    lcTare = tareVec('lcTare');
+    lcTare = tareVec('lcTareN');
+    if ~hasPref('lcTareN'), lcTare = tareVec('lcTare') * lbfToN; end   % an old tare was saved in lbf
 
     % --- state: USB ---
     s = [];
@@ -181,24 +186,24 @@ function DAQ_Live_Monitor()
     ptFsField = uieditfield(fig, 'numeric', 'Position', [832, 735, 60, 22], 'Value', prefOr('ptFs', ptFsDef), ...
         'Limits', [1 Inf], 'Tooltip', 'Full scale of the PT: the y-axis shows 5 % of it at least', ...
         'ValueChangedFcn', @(src, ~) scaleChanged('ptFs', src.Value));
-    uilabel(fig, 'Position', [902, 735, 45, 22], 'Text', 'FS lbf:');
-    lcFsField = uieditfield(fig, 'numeric', 'Position', [945, 735, 60, 22], 'Value', prefOr('lcFs', lcFsDef), ...
+    uilabel(fig, 'Position', [902, 735, 45, 22], 'Text', 'FS N:');
+    lcFsField = uieditfield(fig, 'numeric', 'Position', [945, 735, 60, 22], 'Value', prefOr('lcFsN', lcFsDef), ...
         'Limits', [1 Inf], 'Tooltip', 'Full scale of the load cell: the y-axis shows 5 % of it at least', ...
-        'ValueChangedFcn', @(src, ~) scaleChanged('lcFs', src.Value));
+        'ValueChangedFcn', @(src, ~) scaleChanged('lcFsN', src.Value));
     logCheck = uicheckbox(fig, 'Position', [1025, 735, 105, 22], 'Text', 'Log to CSV', 'Value', true);
 
     uilabel(fig, 'Position', [20, 705, 75, 22], 'Text', 'PT (psi/V):');
     ptScaleField = uieditfield(fig, 'numeric', 'Position', [90, 705, 75, 22], 'Value', prefOr('ptScale', ptScaleDef), ...
         'ValueChangedFcn', @(src, ~) scaleChanged('ptScale', src.Value));
-    uilabel(fig, 'Position', [180, 705, 120, 22], 'Text', 'LC (lbf per mV/V):');
-    lcScaleField = uieditfield(fig, 'numeric', 'Position', [290, 705, 75, 22], 'Value', prefOr('lcScale', lcScaleDef), ...
-        'ValueChangedFcn', @(src, ~) scaleChanged('lcScale', src.Value));
+    uilabel(fig, 'Position', [180, 705, 120, 22], 'Text', 'LC (N per mV/V):');
+    lcScaleField = uieditfield(fig, 'numeric', 'Position', [290, 705, 75, 22], 'Value', prefOr('lcScaleN', lcScaleDef), ...
+        'ValueChangedFcn', @(src, ~) scaleChanged('lcScaleN', src.Value));
     uibutton(fig, 'Position', [380, 705, 80, 22], 'Text', 'Tare PT', 'ButtonPushedFcn', @(~, ~) onTare(1));
     uibutton(fig, 'Position', [470, 705, 80, 22], 'Text', 'Tare LC', 'ButtonPushedFcn', @(~, ~) onTare(2));
     uibutton(fig, 'Position', [560, 705, 90, 22], 'Text', 'Clear tares', 'ButtonPushedFcn', @(~, ~) onTare(0));
     uilabel(fig, 'Position', [670, 705, 75, 22], 'Text', 'Thrust unit:');
-    unitDrop = uidropdown(fig, 'Position', [745, 705, 65, 22], 'Items', {'lbf', 'N'}, ...
-        'Value', prefItem('forceUnit', {'lbf', 'N'}, 'lbf'), 'ValueChangedFcn', @(src, ~) unitChanged(src.Value));
+    unitDrop = uidropdown(fig, 'Position', [745, 705, 65, 22], 'Items', {'N', 'lbf'}, ...
+        'Value', prefItem('thrustUnit', {'N', 'lbf'}, 'N'), 'ValueChangedFcn', @(src, ~) unitChanged(src.Value));
     uilabel(fig, 'Position', [830, 705, 100, 22], 'Text', 'Stale after (s):');
     staleField = uieditfield(fig, 'numeric', 'Position', [925, 705, 50, 22], 'Value', 3, 'Limits', [0.5 600]);
 
@@ -259,6 +264,14 @@ function DAQ_Live_Monitor()
         v = def;
         try
             if ispref(prefGroup, name), v = getpref(prefGroup, name); end
+        catch
+        end
+    end
+
+    function tf = hasPref(name)
+        tf = false;
+        try
+            tf = ispref(prefGroup, name);
         catch
         end
     end
@@ -896,7 +909,7 @@ function DAQ_Live_Monitor()
 
     function logRows(d, sn, t, us, v)
         if logFile == -1, return; end
-        if sn == 1, nm = 'PT'; bu = 'V'; eu = 'psi'; else, nm = 'LC'; bu = 'mV/V'; eu = 'lbf'; end
+        if sn == 1, nm = 'PT'; bu = 'V'; eu = 'psi'; else, nm = 'LC'; bu = 'mV/V'; eu = 'N'; end
         if strcmp(activeSrc, 'usb'), who = 'USB'; else, who = sprintf('%d', d - 1); end
         e = engOf(d, sn, v);
         if isempty(us)
@@ -906,7 +919,7 @@ function DAQ_Live_Monitor()
         end
     end
 
-    % volts -> psi, mV/V -> lbf, with the tare of DAQ d
+    % volts -> psi, mV/V -> N, with the tare of DAQ d
     function y = engOf(d, sn, v)
         if sn == 1
             y = ptScaleField.Value * v - ptTare(d);
@@ -915,8 +928,13 @@ function DAQ_Live_Monitor()
         end
     end
 
-    function [k, u] = forceScale()
-        if strcmp(unitDrop.Value, 'N'), k = lbfToN; u = 'N'; else, k = 1; u = 'lbf'; end
+    % Display factor from N, the unit and the secondary unit: [k, u, k2, u2]
+    function [k, u, k2, u2] = forceScale()
+        if strcmp(unitDrop.Value, 'lbf')
+            k = 1 / lbfToN; u = 'lbf'; k2 = 1; u2 = 'N';
+        else
+            k = 1; u = 'N'; k2 = 1 / lbfToN; u2 = 'lbf';
+        end
     end
 
     function n = dname(d)
@@ -947,19 +965,19 @@ function DAQ_Live_Monitor()
             end
         end
         savePref('ptTare', ptTare);
-        savePref('lcTare', lcTare);
+        savePref('lcTareN', lcTare);
+        redrawSoon();
+    end
+
+    function unitChanged(u)
+        savePref('thrustUnit', u);
+        lbl = ['Thrust (', u, ')'];
+        if ~strcmp(lbl, lastLblL), ylabel(axL, lbl); lastLblL = lbl; end
         redrawSoon();
     end
 
     function scaleChanged(name, v)
         savePref(name, v);
-        redrawSoon();
-    end
-
-    function unitChanged(u)
-        savePref('forceUnit', u);
-        lbl = ['Thrust (', u, ')'];
-        if ~strcmp(lbl, lastLblL), ylabel(axL, lbl); lastLblL = lbl; end
         redrawSoon();
     end
 
@@ -1093,9 +1111,9 @@ function DAQ_Live_Monitor()
         tNow = toc(t0);
         if ~force && tNow - lastDraw < drawPeriod, return; end
         lastDraw = tNow;
-        [fK, fU] = forceScale();
+        [fK, fU, sK, sU] = forceScale();
         units = {'psi', fU};
-        fsU = [ptFsField.Value, lcFsField.Value * fK];       % the full scales in the units of the plots
+        fsU = [ptFsField.Value, lcFsField.Value * fK];     % the full scales in the units of the plots
         bigs = [ptBig, lcBig];
         bigName = {'Pressure', 'Thrust'};
         tA = oldestT();
@@ -1130,11 +1148,15 @@ function DAQ_Live_Monitor()
                     lo = min(lo, min(yp)); hi = max(hi, max(yp));
                 end
                 vLast = engOf(d, sn, ser(d, sn).V(n));
-                if sn == 2, vLast = vLast * fK; end
-                txt{i} = sprintf('%s %.1f %s', dname(d), vLast, units{sn});
+                if sn == 2
+                    txt{i} = sprintf('%s %.1f %s (%.1f %s)', dname(d), vLast * fK, fU, vLast * sK, sU);
+                else
+                    txt{i} = sprintf('%s %.1f %s', dname(d), vLast, units{sn});
+                end
             end
             setText(bigs(sn), [bigName{sn}, ': ', strjoin(txt, '   ')]);
-            fs = max(14, 30 - 8 * (numel(ids) - 1));
+            fsBase = [30, 22];                                       % the thrust text is longer (lbf beside N)
+            fs = max(11, fsBase(sn) - 7 * (numel(ids) - 1));
             if bigs(sn).FontSize ~= fs, bigs(sn).FontSize = fs; end
             key = sprintf('%d,', ids);
             if ~strcmp(key, legKey{sn})
@@ -1252,7 +1274,7 @@ function DAQ_Live_Monitor()
         parts = cell(1, numel(ids));
         for i = 1:numel(ids)
             d = ids(i);
-            parts{i} = sprintf('%s PT %.2f psi, LC %.2f lbf', dname(d), ptTare(d), lcTare(d));
+            parts{i} = sprintf('%s PT %.2f psi, LC %.2f N (%.2f lbf)', dname(d), ptTare(d), lcTare(d), lcTare(d) / lbfToN);
         end
         t = strjoin(parts, '; ');
     end
@@ -1276,7 +1298,8 @@ function DAQ_Live_Monitor()
     % removes the baseline before the burn).
     function [dBest, rBest, msgs] = bestPeak(sn)
         dBest = 0; rBest = burnStats([], [], 1); msgs = {};
-        minAmp = 5;                                          % N or psi: a smaller peak is not a motor burn
+        minAmps = [5, 5];                                    % psi, N: a smaller peak is not a motor burn
+        minAmp = minAmps(sn);
         ids = find([ser(:, sn).n] > 0);
         if isempty(ids), msgs = {'no data of this sensor'}; end
         for d = ids
@@ -1284,7 +1307,6 @@ function DAQ_Live_Monitor()
             t = ser(d, sn).T(1:n); v = ser(d, sn).V(1:n);
             k = ~isnan(v);
             [t, i] = sort(t(k)); y = engOf(d, sn, v(k)); y = y(i);
-            if sn == 2, y = y * lbfToN; end
             r = burnStats(t, y, minAmp);
             if r.found
                 if ~rBest.found || r.strength > rBest.strength
@@ -1313,10 +1335,12 @@ function DAQ_Live_Monitor()
                 sprintf(f, 'Burn end', sprintf('%.3f s', rF.tEnd)), ...
                 sprintf(f, 'Burn time (5%-5%)', sprintf('%.3f s', rF.burnS)), ...
                 sprintf(f, 'Peak (top 5% avg)', sprintf('%.1f N  (%.1f lbf)', rF.top5, rF.top5 / lbfToN)), ...
-                sprintf(f, 'Max sample', sprintf('%.1f N at %.3f s', rF.maxVal, rF.tMax)), ...
+                sprintf(f, 'Max sample', sprintf('%.1f N  (%.1f lbf) at %.3f s', rF.maxVal, rF.maxVal / lbfToN, rF.tMax)), ...
                 sprintf(f, 'Average thrust', sprintf('%.1f N  (%.1f lbf)', rF.avg, rF.avg / lbfToN)), ...
+                sprintf(f, 'Initial thrust (0.5 s)', sprintf('%.1f N  (%.1f lbf)', rF.initial, rF.initial / lbfToN)), ...
                 sprintf(f, 'Total impulse', sprintf('%.1f N s  (%.1f lbf s)', I, I / lbfToN)), ...
                 sprintf(f, 'Motor class', sprintf('%s  (%.0f %% of %s)', cls, pct, cls)), ...
+                sprintf(f, 'Motor name', sprintf('%s%.0f', cls, rF.avg)), ...
                 sprintf(f, 'Baseline removed', sprintf('%.2f N  (%.2f lbf)', rF.base, rF.base / lbfToN)), ...
                 sprintf(f, 'Peak / noise', sprintf('%.0f x', rF.strength)), ''}];
         else
@@ -1353,7 +1377,7 @@ function DAQ_Live_Monitor()
                 L{end+1} = sprintf('WARNING: a data gap of %.2f s is inside the burn (straight line over it).', q.gapMax); %#ok<AGROW>
             end
         end
-        L = [L, {'', 'Telemetry data is decimated (about 60 samples/s).', 'Use the SD or NAND file for the final numbers.'}];
+        L = [L, {'', 'Telemetry data is decimated (about 60 samples/s).', 'Use the SD or NAND file for the final numbers', '(DAQ_Calibration_App: Files & Plot > Motor performance).'}];
         perfTxt.Value = L(:);
         plotBurn(perfAxT, dF, rF, tRef, 2);
         plotBurn(perfAxP, dP, rP, tRef, 1);
@@ -1381,7 +1405,7 @@ function DAQ_Live_Monitor()
         ylim(ax, yl);
         xlim(ax, [x(1), max(x(end), x(1) + 1e-3)]);
         if sn == 2
-            title(ax, sprintf('Thrust: peak %.0f N, avg %.0f N, impulse %.0f N s, burn %.2f s', r.top5, r.avg, r.integral, r.burnS));
+            title(ax, sprintf('Thrust: peak %.0f N (%.0f lbf), avg %.0f N, impulse %.0f N s (%.0f lbf s), burn %.2f s', r.top5, r.top5 / lbfToN, r.avg, r.integral, r.integral / lbfToN, r.burnS));
         else
             title(ax, sprintf('Pressure: peak %.0f psi, avg %.0f psi', r.top5, r.avg));
         end
@@ -1415,7 +1439,14 @@ function DAQ_Live_Monitor()
             exportgraphics(perfAxP, [base, '_pressure.png']);
         catch
         end
-        perfLbl.Text = ['Saved: ', base, '.txt, _curve.csv, .png'];
+        msg = '';
+        try
+            exportBurnPdf([base, '.pdf'], 'Static fire: thrust and pressure', perfRes.rF, perfRes.rP, perfRes.tRef, ...
+                burnSummary('live telemetry', perfRes.rF, perfRes.rP));
+        catch ME
+            msg = ['  (PDF failed: ', ME.message, ')'];
+        end
+        perfLbl.Text = ['Saved: ', base, '.txt, _curve.csv, .png, .pdf', msg];
     end
 
     % =====================================================================
@@ -1451,10 +1482,11 @@ end
 %   Burn     from where the curve passes 5 % of the peak going up, to where it goes below 5 % after the peak
 %            (crossing times are interpolated).
 %   top5     the mean of the highest 5 % of the burn samples. avg = integral / burn time. integral: trapezoids.
+%   initial  the mean of the first 0.5 s of the burn.
 function r = burnStats(t, y, minAmp)
     r = struct('found', false, 'msg', '', 'strength', 0, 'base', 0, 'tStart', NaN, 'tEnd', NaN, 'burnS', NaN, ...
         'tPeak', NaN, 'tMax', NaN, 'maxVal', NaN, 'top5', NaN, 'avg', NaN, 'integral', NaN, 'gapMax', 0, ...
-        'cutStart', false, 'cutEnd', false, 'tAll', [], 'yAll', []);
+        'cutStart', false, 'cutEnd', false, 'initial', NaN, 'tAll', [], 'yAll', []);
     n = numel(t);
     if n < 20, r.msg = 'not enough data'; return; end
     t = reshape(t, 1, []); y = reshape(y, 1, []);
@@ -1504,6 +1536,10 @@ function r = burnStats(t, y, minAmp)
     r.integral = trapz(tt, yy);
     r.avg = r.integral / max(r.burnS, eps);
     [r.maxVal, im] = max(yn(i0:i1));
+    tb = t(i0:i1); yb = yn(i0:i1);
+    kI = tb <= r.tStart + 0.5;                 % initial thrust: the mean of the FIRST 0.5 s of the burn (t <= start + 0.5 s)
+    if ~any(kI), kI(1) = true; end
+    r.initial = mean(yb(kI));
     r.tMax = t(i0 + im - 1);
     r.tPeak = t(ip);
     r.gapMax = max(diff(tt));
@@ -1525,6 +1561,60 @@ function [c, pct] = motorClass(I)
     k = ceil(log2(I / 2.5));
     c = char('A' + k);
     pct = 100 * I / (2.5 * 2^k);
+end
+
+% The short report of the old StaticFirePerf script (same words): file, motor name (class letter + average thrust in N),
+% total impulse, max and average thrust, initial thrust (first 0.5 s), burn time, max and average pressure.
+% rF: burnStats of the thrust (N), rP: burnStats of the pressure (psi). lbf (second unit) is in brackets.
+function L = burnSummary(name, rF, rP)
+    lb = 4.4482216152605;
+    L = {['File: ', name]};
+    if rF.found
+        cls = motorClass(rF.integral);
+        L = [L, {sprintf('Motor Name: %s%.0f', cls, rF.avg), ...
+            sprintf('Total Impulse: %.2f N%cs  (%.2f lbf%cs)', rF.integral, 183, rF.integral / lb, 183), ...
+            sprintf('Max Thrust: %.2f N  (%.2f lbf)', rF.maxVal, rF.maxVal / lb), ...
+            sprintf('Average Thrust: %.2f N  (%.2f lbf)', rF.avg, rF.avg / lb), ...
+            sprintf('Initial Thrust (0.5 s): %.2f N  (%.2f lbf)', rF.initial, rF.initial / lb), ...
+            sprintf('Burn Time: %.2f s', rF.burnS)}];
+    else
+        L{end+1} = 'Thrust: no strong peak found';
+    end
+    if rP.found
+        L = [L, {sprintf('Max Pressure: %.2f psi', rP.maxVal), sprintf('Average Pressure: %.2f psi', rP.avg)}];
+    else
+        L{end+1} = 'Pressure: no strong peak found';
+    end
+end
+
+% The PDF page of the old StaticFirePerf script: thrust (left axis, N) and pressure (right axis, psi) against the time from the
+% burn start, and the short report under the plot. tRef: the time of the burn start. summary: the lines of burnSummary.
+function exportBurnPdf(pdfFile, titleStr, rF, rP, tRef, summary)
+    fig = figure('Visible', 'off', 'Position', [100 100 900 650]);
+    guard = onCleanup(@() close(fig));            %#ok<NASGU> closes the figure also when an error happens below
+    ax = axes(fig);
+    cT = [0.85 0 0]; cP = [0 0.45 0.74];
+    yyaxis(ax, 'left');
+    if rF.found
+        k = rF.tAll >= rF.tStart - 2 & rF.tAll <= rF.tEnd + 2;
+        plot(ax, rF.tAll(k) - tRef, rF.yAll(k), '-', 'Color', cT);
+    end
+    ylabel(ax, 'Thrust (N)');
+    ax.YAxis(1).Color = cT;
+    yyaxis(ax, 'right');
+    if rP.found
+        k = rP.tAll >= rP.tStart - 2 & rP.tAll <= rP.tEnd + 2;
+        plot(ax, rP.tAll(k) - tRef, rP.yAll(k), '-', 'Color', cP);
+    end
+    ylabel(ax, 'Pressure (psi)');
+    ax.YAxis(2).Color = cP;
+    xlabel(ax, 'Time from the burn start (s)');
+    grid(ax, 'on');
+    title(ax, titleStr, 'Interpreter', 'none');
+    ax.Position = [0.13 0.42 0.775 0.5];          % room for the report under the plot
+    annotation(fig, 'textbox', [0.13 0.02 0.775 0.32], 'String', summary, 'FontSize', 10, 'FontName', 'FixedWidth', ...
+        'EdgeColor', 'none', 'VerticalAlignment', 'top', 'Interpreter', 'none');
+    exportgraphics(fig, pdfFile, 'ContentType', 'vector');
 end
 
 % ========================================================================= plot helpers

@@ -19,7 +19,17 @@
      kind 2..5      float32: PT A, PT B, load cell A, load cell B
      kind 6 END     u32: zlib CRC-32 over the 20 payload bytes of kinds 1 to 5
    PT: pressure (PSI) = A x V + B (V in volts). Load cell: force (N) = A x (mV/V) + B. A reader ignores a block that is not
-   complete or whose CRC is wrong (a file that the ring cut at its start). */
+   complete or whose CRC is wrong (a file that the ring cut at its start).
+
+   Temperature (NTC thermistors on ADS1115 AIN2 and AIN3): two META records one after the other, so the PFS file, the SD file
+   and the chain use the same 8-byte record:
+     kind 12 NTC_TIME   u32: time of the reading, same clock as the sensor records (wraps in 71 min)
+     kind 13 NTC_RAW    bits 14..0 = AIN2 count, bit 15 = AIN2 type (0 = 10 kohm, 1 = 100 kohm NTC),
+                        bits 30..16 = AIN3 count, bit 31 = AIN3 type. Count: ADS1115 at +/-4.096 V, 125 uV per count (the PT uses +/-6.144 V).
+                        0xFFFF in a half = this thermistor is not installed (below its limit, see ads1115.c): the DAQ writes
+                        nothing when both are not installed. A real count is at most 32767 (4.096 V), so 0xFFFF is never a reading.
+   A reader uses kind 13 only right after a kind 12; any other record between them drops the pair. Kinds 8..11 are internal to
+   the live stream (telem.h) and are never in a file. */
 #ifndef RECORD_H
 #define RECORD_H
 
@@ -37,6 +47,10 @@ typedef struct __attribute__((packed)) {
 #define REC_LC_SEQ_MASK  0x7FU
 
 #define REC_META_BASE    0xFFFFFFF0U   /* the time field of a META record: REC_META_BASE + kind */
+
+#define REC_META_NTC_TIME 12U
+#define REC_META_NTC_RAW  13U
+#define REC_NTC_ABSENT    0xFFFFU
 
 static inline bool rec_is_meta(const record_t *r) { return r->timestamp_us >= REC_META_BASE; }
 
